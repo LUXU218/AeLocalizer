@@ -4,7 +4,6 @@
     python tools/restore_all.py          # 真的还原
     python tools/restore_all.py --dry    # 只预演
 
-由 `一键还原AE原版.bat` 调用；也可单独跑。
 """
 from __future__ import annotations
 
