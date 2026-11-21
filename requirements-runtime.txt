@@ -1,0 +1,2 @@
+# Windows nearby-allocation and unload fixes required by AE runtime hooks.
+frida==17.26.3

@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>aeloc scene</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  #host { position: fixed; inset: 0; }
+  #host canvas { display: block; width: 100% !important; height: 100% !important; }
+</style>
+</head>
+<body>
+<div id="host"></div>
+<script src="webwallgl.global.min.js"></script>
+<script>
+// 场景渲染页（AeLocalizer）：由 core/scene_server.py 提供。
+// ★ 页面本身不含业务逻辑：mount 之后只暴露 __aeloc.setProps 供 Qt 侧热更新。
+(function () {
+  var state = { state: 'init', error: '', props: null };
+  var savedProps = Object.create(null);
+  var mountGeneration = 0;
+  var host = document.getElementById('host');
+  // 当前页的目录（含 token），壁纸目录挂在它下面的 wp/
+  var base = location.pathname.replace(/[^/]*$/, '');
+  var wpUrl = location.origin + base + 'wp/';
+
+  window.__aeloc = {
+    status: function () { return JSON.stringify(state); },
+    diag: function () { return JSON.stringify(state.diag || []); },
+    // 画布像素指纹：给 QML 侧自检用（判"有没有真画出来 / 热更新有没有生效"）
+    // 热切场景：换壁纸时服务端只换目录，页面 origin 不变 → 这里直接 load 新源，
+    // 省掉整页重载（WebEngine 启动 + 页面解析 + 引擎初始化）
+    reload: function (props) {
+      // ★ 实测：直接在旧实例上 load() 新源会把画面搞黑（引擎内部颜色/GL 没重初始化）。
+      //   所以这里**销毁重建实例**，但保留同一个页面/浏览器进程 —— 省掉 WebEngine
+      //   启动 + 页面加载，场景重建本身很快。
+      try {
+        state.state = 'reloading';
+        state.error = '';
+        try { if (window.__inst && window.__inst.destroy) window.__inst.destroy(); } catch (e) {}
+        window.__inst = null;
+        host.innerHTML = '';
+        savedProps = Object.assign(Object.create(null), props);
+        mountScene();
+        return 'remounting';
+      } catch (e) { return 'err: ' + e; }
+    },
+    pause: function () {
+      try { if (window.__inst && window.__inst.pause) { window.__inst.pause(); return 'paused'; } } catch (e) {}
+      return 'no-inst';
+    },
+    resume: function () {
+      try { if (window.__inst && window.__inst.play) { window.__inst.play(); return 'playing'; } } catch (e) {}
+      return 'no-inst';
+    },
+    sig: function () {
+      var c = host.querySelector('canvas');
+      if (!c) return 'no-canvas';
+      try {
+        var t = document.createElement('canvas');
+        t.width = 32; t.height = 20;
+        var ctx = t.getContext('2d');
+        ctx.drawImage(c, 0, 0, 32, 20);
+        var d = ctx.getImageData(0, 0, 32, 20).data;
+        var h = 0, sum = 0;
+        for (var i = 0; i < d.length; i += 4) {
+          h = (h * 31 + d[i] + 7 * d[i + 1] + 13 * d[i + 2]) >>> 0;
+          sum += d[i] + d[i + 1] + d[i + 2];
+        }
+        return h + '/' + Math.round(sum / (32 * 20 * 3));
+      } catch (e) { return 'sig-err'; }
+    },
+    setProps: function (obj) {
+      try {
+        Object.assign(savedProps, obj);
+        if (!window.__inst || !window.__inst.setProperties) return 'queued';
+        window.__inst.setProperties(obj);
+        return 'ok';
+      } catch (e) {
+        return 'err: ' + e;
+      }
+    }
+  };
+
+  window.addEventListener('error', function (e) { state.error = String(e.message || e); });
+  window.addEventListener('unhandledrejection', function (e) {
+    state.error = String((e.reason && (e.reason.stack || e.reason.message)) || e.reason);
+  });
+
+  var api = window.WebWallGL;
+  if (!api) { state.state = 'no-api'; return; }
+
+  function fitCanvas() {
+    var c = host.querySelector('canvas');
+    if (!c) return;
+    c.style.width = '100%';
+    c.style.height = '100%';
+    c.style.display = 'block';
+  }
+  new MutationObserver(fitCanvas).observe(host, { childList: true });
+
+  state.diag = [];
+  function mountScene() {
+    var generation = ++mountGeneration;
+    api.mount(host, {
+      source: api.httpSource(wpUrl),
+      properties: { ...savedProps },
+      fit: 'cover',
+      // ★ 画质优先：不降帧（60fps 与源一致）；贴图按原始尺寸上传，不做额外缩放
+      fps: 60,
+      videoTexScale: 1,
+      // 诊断通道：渲染器装配/贴图/模型出问题时会往这里写，排障全靠它
+      onDiagnostic: function (msg, level) {
+        if (state.diag.length < 60) state.diag.push(String(level || 'info') + ': ' + String(msg));
+      },
+      onError: function (err) {
+        if (generation !== mountGeneration) return;
+        state.state = 'error';
+        state.error = String((err && (err.message || err)) || '');
+      }
+    })
+      .then(function (inst) {
+        if (generation !== mountGeneration) {
+          inst.destroy();
+          return;
+        }
+        window.__inst = inst;
+        if (inst.setProperties && Object.keys(savedProps).length) inst.setProperties(savedProps);
+        try { state.props = inst.getProperties ? Object.keys(inst.getProperties()) : null; } catch (e) {}
+        state.state = 'mounted';
+        fitCanvas();
+      })
+      .catch(function (e) {
+        if (generation !== mountGeneration) return;
+        state.state = 'rejected';
+        state.error = String((e && (e.stack || e.message)) || e);
+      });
+  }
+  state.state = 'mounting';
+  mountScene();
+})();
+</script>
+</body>
+</html>
