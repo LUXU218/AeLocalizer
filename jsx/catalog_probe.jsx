@@ -24,7 +24,7 @@
             });
         }
         report.effectCount = report.catalog.length;
-        report.rendering = app.project.renderQueue.rendering;
+        report.rendering = !!(app.project && app.project.renderQueue && app.project.renderQueue.rendering);
     } catch (err) {
         report.error = String(err);
     }
@@ -45,7 +45,6 @@
     file.encoding = "UTF-8";
     if (!file.open("w")) {
         $.writeln("AELOCALIZER_CATALOG " + payload);
-        alert("AeLocalizer 目录探针无法写结果文件: " + file.error);
         return;
     }
     file.write(payload);

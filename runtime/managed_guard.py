@@ -538,6 +538,8 @@ class LanguageEngine:
             # reports its own channel error instead.
             self.popup_error = ""
             try:
+                if getattr(new_draw, "popup_profile_error", ""):
+                    raise RuntimeError(new_draw.popup_profile_error)
                 new_popup = PopupSession(pid, self.data_root,
                                          self.project_root,
                                          identity=ident,

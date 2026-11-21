@@ -388,7 +388,7 @@ def analyze_install(exe, progress=None, cancel=None) -> dict:
         _vp = (tools.version or "").split(".")
         profile = tools.complete_static(
             "%s.%sx%s" % (_vp[0], _vp[1], _vp[3]) if len(_vp) == 4 else "")
-        profile = _language_candidate(tools, profile)
+        profile = _language_candidate(tools, profile, report)
         step("复核模块未变化")
         tools.verify_files()
         if cancel is not None and cancel.is_set():
@@ -408,13 +408,14 @@ def analyze_install(exe, progress=None, cancel=None) -> dict:
     return report
 
 
-def _language_candidate(tools, profile):
+def _language_candidate(tools, profile, report):
     """Collect read-only evidence for the installed parameter channels."""
     from dataclasses import replace
     from .adapter import year_of
     try:
         from runtime import build_profile as bp
-    except ImportError:
+    except ImportError as error:
+        report["parameterDrawError"] = str(error)
         return profile
 
     if not year_of(profile.version):
@@ -422,21 +423,39 @@ def _language_candidate(tools, profile):
     lib = tools.exe.parent / "AfterFXLib.dll"
     try:
         if lib.is_symlink() or lib.is_junction() or lib.stat().st_size > MAX_MODULE_BYTES:
+            report["parameterDrawError"] = "AfterFXLib.dll 路径或大小未通过验证"
             return profile
         draw = bp.draw_candidate(lib, allow_unknown=True)
-    except (bp.BuildMismatch, ValueError, OSError):
+    except (bp.BuildMismatch, ValueError, OSError) as error:
+        report["parameterDrawError"] = str(error)
         return profile
     profile = replace(profile, parameter_draw_sha=draw["sha256"])
     flt = tools.module("FLT.dll")["path"]
+    stage = "FLT 效果树"
     try:
         root = bp.parade_vtable(flt, profile.flt_sha, allow_unknown=True)
         profile = replace(profile, root_vtable=root["vt_rva"])
         if not profile.count_get:
+            report["popupLayoutError"] = "TDB 参数流枚举布局未通过校验"
             return profile
+        stage = "FLT 下拉控件类型"
         bp.popup_profile(flt, profile.flt_sha, allow_unknown=True)
-        bp.popup_field_layout(tools.module("TDB.dll")["path"], profile.tdb_sha)
-        return replace(profile, popup_layout_verified=True)
-    except (bp.BuildMismatch, ValueError, OSError):
+        stage = "TDB 选项指针"
+        tdb = tools.module("TDB.dll")["path"]
+        try:
+            bp.popup_field_layout(tdb, profile.tdb_sha)
+            return replace(profile, popup_layout_verified=True)
+        except bp.BuildMismatch:
+            media = tools.exe.parent / "MediaFoundation.dll"
+            if (not media.is_file() or media.is_symlink() or media.is_junction()
+                    or media.stat().st_size > MAX_MODULE_BYTES):
+                raise
+            stage = "TDB 与 MediaFoundation 选项指针"
+            media_sha = bp.sha256_file(media)
+            bp.media_popup_field_layout(tdb, profile.tdb_sha, media, media_sha)
+            return replace(profile, popup_layout_verified=True, popup_media_sha=media_sha)
+    except (bp.BuildMismatch, ValueError, OSError) as error:
+        report["popupLayoutError"] = f"{stage}：{error}"
         return profile
 
 

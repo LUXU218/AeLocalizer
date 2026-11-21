@@ -17,8 +17,10 @@ The derivation is structural and fail-closed:
     ``const std::wstring&`` (Win64 stack slot [rsp+0x28]).
   * Every direct ``call EDB_DrawString`` candidate is scored against the
     2025.5.0.4 call-site neighbourhood (a code template, not an address).
-    A candidate is accepted only if it is uniquely best by a wide margin and
-    is preceded by the XMM store that homes argument 5 at [rsp+0x20]
+    Close matches require explicit evidence of a topic-pane draw function.
+    When both pane implementations are present their function bodies must
+    also be verified as equivalent.
+    Both require the XMM store that homes argument 5 at [rsp+0x20]
     (the same prelude that guarantees argument 6 is at [rsp+0x28]).
   * The popup vtable is found by class name in the MSVC RTTI type
     descriptors, then resolved to its vtable through the Complete Object
@@ -31,6 +33,7 @@ runtime then refuses to write instead of guessing offsets.
 from __future__ import annotations
 
 import difflib
+import bisect
 import hashlib
 import os
 import re
@@ -238,9 +241,12 @@ class PEImage:
         self.size_of_image = self._u32_at(opt + 56)
         ndirs = self._u32_at(opt + 108)
         self.export_dir = (0, 0)
+        self.exception_dir = (0, 0)
         if ndirs >= 1:
             self.export_dir = (self._u32_at(opt + 112),
                                self._u32_at(opt + 116))
+        if ndirs >= 4 and optsz >= 144:
+            self.exception_dir = (self._u32_at(opt + 136), self._u32_at(opt + 140))
         self.sections = []
         for i in range(nsect):
             s = opt + optsz + i * 40
@@ -364,6 +370,105 @@ def _find_arg5_store(text, call_off):
     return best
 
 
+_TOPIC_GETTERS = {
+    b"?GetODataPtr@CTopicPane@@QEAAPEAUOutlineData@@XZ": "classic",
+    b"?GetODataPtr@CTopicPaneV2@@QEAAPEAUOutlineData@@XZ": "v2",
+}
+
+
+def _draw_site(text, base, offset):
+    found = _find_arg5_store(text, offset)
+    if found is None:
+        raise BuildMismatch("arg5 prelude store missing at call %#x" % (base + offset))
+    pre, pattern = found
+    if not len(pattern) <= offset - pre <= MAX_PRE_GAP or offset + 13 > len(text):
+        raise BuildMismatch("invalid argument store or truncated draw callsite")
+    return {
+        "pre_rva": base + pre, "call_rva": base + offset, "ret_rva": base + offset + 5,
+        "pre_bytes": pattern.hex(), "call_bytes": text[offset:offset + 5].hex(),
+        "ret_bytes": text[offset + 5:offset + 13].hex(),
+    }
+
+
+def _verified_topic_panes(image, exports, sites):
+    """Select matching paint functions by their known pane and drawing calls."""
+    try:
+        from capstone import CS_ARCH_X86, CS_GRP_CALL, CS_GRP_JUMP, CS_MODE_64, Cs
+        from capstone.x86 import X86_OP_IMM, X86_OP_MEM, X86_REG_RIP, X86_REG_RSP
+    except ImportError as error:
+        raise BuildMismatch("topic-pane verification requires Capstone") from error
+
+    directory, size = image.exception_dir
+    if not directory or not 12 <= size <= 4 * 1024 * 1024 or size % 12:
+        raise BuildMismatch("no valid function table for topic-pane verification")
+    functions = list(struct.iter_unpack("<III", image.read_rva(directory, size)))
+    getters = {exports[name]: tag for name, tag in _TOPIC_GETTERS.items() if name in exports}
+    drawing_calls = (b"?EDB_GetFontFromStyleSheet@@", b"?EDB_GetBaselineForCenteredText@@")
+    by_address = {rva: name for name, rva in exports.items() if name.startswith(drawing_calls)}
+    decoder = Cs(CS_ARCH_X86, CS_MODE_64)
+    decoder.detail = True
+    verified = []
+    shapes = []
+    owners = []
+    for site in sites:
+        call = site["call_rva"]
+        index = bisect.bisect_right(functions, call, key=lambda item: item[0]) - 1
+        if index < 0:
+            raise BuildMismatch("draw call outside function table")
+        start, end, _ = functions[index]
+        if not start <= site["pre_rva"] < call < end or end - start > 2048:
+            raise BuildMismatch("draw call outside a bounded topic-pane function")
+        raw = image.read_rva(start, end - start)
+        normalized = bytearray(raw)
+        targets = []
+        pane_getters = []
+        helpers = []
+        cursor = start
+        instructions = set()
+        stable_stack = True
+        for ins in decoder.disasm(raw, start):
+            instructions.add(ins.address)
+            pos = ins.address - start
+            cursor = ins.address + ins.size
+            if site["pre_rva"] <= ins.address < call:
+                stable_stack &= not (ins.group(CS_GRP_CALL) or ins.group(CS_GRP_JUMP)
+                                      or X86_REG_RSP in ins.regs_access()[1])
+            if ins.group(CS_GRP_CALL) and ins.operands[0].type == X86_OP_IMM:
+                target = ins.operands[0].imm
+                if ins.address < site["pre_rva"] and target in by_address:
+                    helpers.append(by_address[target].split(b"@@", 1)[0] + b"@@")
+                if target in getters:
+                    pane_getters.append(getters[target])
+                    target = "pane-getter"
+                targets.append((pos, target))
+                size = ins.imm_size
+                operand = pos + ins.imm_offset
+                normalized[operand:operand + size] = bytes(size)
+            elif ins.group(CS_GRP_JUMP) and ins.operands[0].type == X86_OP_IMM:
+                if not start <= ins.operands[0].imm < end:
+                    raise BuildMismatch("topic-pane branch leaves the verified function")
+            for op in ins.operands:
+                if op.type == X86_OP_MEM and op.mem.base == X86_REG_RIP:
+                    targets.append((pos, cursor + op.mem.disp))
+                    size = ins.disp_size
+                    operand = pos + ins.disp_offset
+                    normalized[operand:operand + size] = bytes(size)
+        if not pane_getters:
+            continue
+        if (cursor != end or len(pane_getters) != 1 or tuple(helpers) != drawing_calls
+                or not stable_stack or raw[site["pre_rva"] - start - 5:site["pre_rva"] - start] != b"\x48\x89\x5c\x24\x28"
+                or not {site["pre_rva"], call, site["ret_rva"]} <= instructions):
+            raise BuildMismatch("topic-pane evidence or draw instruction boundary missing")
+        verified.append(site)
+        owners.append(pane_getters[0])
+        shapes.append((normalized, targets, call - start, site["pre_rva"] - start))
+    if not verified:
+        raise BuildMismatch("no candidate calls a verified topic-pane getter")
+    if len(verified) > 1 and (len(verified) != 2 or set(owners) != {"classic", "v2"} or shapes[0] != shapes[1]):
+        raise BuildMismatch("topic-pane function bodies disagree")
+    return verified
+
+
 def draw_candidate(path, sha=None, allow_unknown=False):
     """Derive and verify the EDB_DrawString parameter-label call site.
 
@@ -404,24 +509,20 @@ def draw_candidate(path, sha=None, allow_unknown=False):
     runner = scored[1][0] if len(scored) > 1 else 0.0
     if top_score < MIN_SCORE:
         raise BuildMismatch("draw callsite not recognized (score=%.3f)" % top_score)
+    site = _draw_site(text, text_rva, top_off)
+    additional_sites = []
+    draw_family = "single"
     if top_score - runner < MIN_MARGIN:
-        raise BuildMismatch("draw callsite ambiguous (%.3f vs %.3f)"
-                            % (top_score, runner))
-    found = _find_arg5_store(text, top_off)
-    if found is None:
-        raise BuildMismatch("arg5 prelude store missing at call %#x"
-                            % (text_rva + top_off))
-    pre_off, pre_pat = found
-    gap = top_off - pre_off
-    if gap < 5 or gap > MAX_PRE_GAP:
-        raise BuildMismatch("arg5 prelude gap %d out of range" % gap)
-    call_bytes = text[top_off:top_off + 5]
-    ret_bytes = text[top_off + 5:top_off + 13]
-    if len(call_bytes) != 5 or len(ret_bytes) != 8:
-        raise BuildMismatch("truncated callsite")
-    pre_rva = text_rva + pre_off
-    call_rva = text_rva + top_off
-    ret_rva = call_rva + 5
+        ambiguous = "draw callsite ambiguous (%.3f vs %.3f)" % (top_score, runner)
+        close = [off for score, off in scored if score >= MIN_SCORE and top_score - score < MIN_MARGIN]
+        if len(close) not in (2, 3, 4):
+            raise BuildMismatch(ambiguous)
+        try:
+            sites = [_draw_site(text, text_rva, off) for off in close]
+            site, *additional_sites = _verified_topic_panes(img, exports, sites)
+        except BuildMismatch as error:
+            raise BuildMismatch(f"{ambiguous}: {error}") from error
+        draw_family = "topic-pane-pair" if additional_sites else "topic-pane-single"
     return {
         "kind": "afterfxlib",
         "path": os.path.abspath(path),
@@ -429,12 +530,9 @@ def draw_candidate(path, sha=None, allow_unknown=False):
         "known_version": known_version("afterfxlib", sha),
         "verified_build": bool(known_version("afterfxlib", sha)),
         "signature_sha256": sig_sha,
-        "pre_rva": pre_rva,
-        "call_rva": call_rva,
-        "ret_rva": ret_rva,
-        "pre_bytes": pre_pat.hex(),
-        "call_bytes": call_bytes.hex(),
-        "ret_bytes": ret_bytes.hex(),
+        **site,
+        "additional_sites": additional_sites,
+        "draw_family": draw_family,
         "arg_slot": DRAW_ARG_SLOT,
         "arg5_slot": DRAW_ARG5_SLOT,
         "confidence": round(top_score, 3),
@@ -701,6 +799,22 @@ def parade_vtable(path, sha=None, allow_unknown=False):
     }
 
 
+def _popup_compare_offset(code, param_type, pointer_use):
+    # Extra compiler form of the same 0x8090 type mask: cases 4, 7 and 15
+    # all reach the field computation. The first two branches must land
+    # exactly at the MOV, and the rejected case must skip the pointer use.
+    pattern = (param_type + rb"\x83\xf8\x04\x74\x0e\x83\xf8\x07\x74\x09"
+               rb"\x83\xf8\x0f\x0f\x85(?P<skip>....)\xb8(?P<offset>....)" + pointer_use)
+    matches = list(re.finditer(pattern, code, re.S))
+    if len(matches) != 1:
+        return None
+    match = matches[0]
+    rejected = match.end("skip") + struct.unpack("<i", match["skip"])[0]
+    if rejected < match.end():
+        return None
+    return struct.unpack("<I", match["offset"])[0]
+
+
 def popup_field_layout(path, sha=None):
     """Verify the classic TDB popup string layout through SetParamDef.
 
@@ -740,15 +854,97 @@ def popup_field_layout(path, sha=None):
     writer = branch(copy + calls[0].start() + 23, 0xE8)
     # PF_Param_POPUP participates in the typed string mask (0x8090).
     # Both paths independently check the type and dereference the string.
+    read_code = span(reader, 160)
+    write_code = span(writer, 100)
     read = re.search(rb"\x8b\x42\x0c\x83\xf8\x0f\x0f\x87....\xb9\x90\x80\x00\x00"
                      rb"\x0f\xa3\xc1\x0f\x83....\x48\x8d\x42(.)"
-                     rb"\x48\x85\xc0\x0f\x84....\x48\x8b\x10", span(reader, 120), re.S)
+                     rb"\x48\x85\xc0\x0f\x84....\x48\x8b\x10", read_code, re.S)
     write = re.search(rb"\x8b\x41\x0c\x83\xf8\x0f\x0f\x87....\xba\x90\x80\x00\x00"
                       rb"\x0f\xa3\xc2\x0f\x83....\x48\x8d\x59(.)"
-                      rb"\x48\x85\xdb\x0f\x84....\x48\x8b\x0b", span(writer, 100), re.S)
-    if (not read or not write or read[1] != write[1]
-            or wrapper[6] + read[1][0] != POPUP_FIELD_OFFSET):
+                      rb"\x48\x85\xdb\x0f\x84....\x48\x8b\x0b", write_code, re.S)
+    if read and write:
+        read_offset, write_offset = read[1][0], write[1][0]
+    else:
+        read_offset = _popup_compare_offset(
+            read_code, rb"\x8b\x42\x0c",
+            rb"(?:\x48\x8d\x0c\x02\x48\x85\xc9\x74.\x48\x8b\x11"
+            rb"|\x4c\x8d\x34\x02\x4c\x89\x74\x24.\x4d\x85\xf6\x0f\x84....\x49\x83\x3e\x00)")
+        write_offset = _popup_compare_offset(
+            write_code, rb"\x8b\x41\x0c",
+            rb"\x48\x8d\x1c[\x01\x08]\x48\x85\xdb\x0f\x84....\x48\x8b\x0b")
+    if (read_offset is None or read_offset != write_offset
+            or wrapper[6] + read_offset != POPUP_FIELD_OFFSET):
         raise BuildMismatch("popup option pointer layout changed")
+    return POPUP_FIELD_OFFSET
+
+
+def media_popup_field_layout(tdb_path, tdb_sha, media_path, media_sha):
+    """Verify a TDB wrapper that delegates the typed option storage to MediaFoundation."""
+    import pefile
+    from capstone import CS_ARCH_X86, CS_MODE_64, Cs
+
+    _require_verified(tdb_path, tdb_sha, "tdb", allow_unknown=True)
+    _require_verified(media_path, media_sha, "mediafoundation", allow_unknown=True)
+    tdb = PEImage(tdb_path)
+    media = PEImage(media_path)
+    wrapper_export = b"?SetParamDef@TDB_StreamBase@@QEAAXAEBUPF_ParamDef@@@Z"
+    copy_export = b"?PF_ParamDefStr_Copy@PF_ParamDefStr@@QEBAXAEBUPF_ParamDef@@PEAU2@@Z"
+    entry = tdb.exports().get(wrapper_export)
+    if entry is None:
+        raise BuildMismatch("TDB parameter definition wrapper missing")
+    wrapper = tdb.read_rva(entry, 48)
+    found = re.fullmatch(
+        rb"\x48\x89\x5c\x24\x08\x57\x48\x83\xec\x20\x48\x8b\xfa\x48\x8b\xd9"
+        rb"\xe8....\x4c\x8d\x43(.)\x48\x8b\xd7\x48\x8b\xc8\x48\x8b\x5c\x24\x30"
+        rb"\x48\x83\xc4\x20\x5f\x48\xff\x25(....)", wrapper, re.S)
+    if not found:
+        raise BuildMismatch("TDB MediaFoundation popup wrapper changed")
+    import_slot = entry + len(wrapper) + struct.unpack("<i", found[2])[0]
+    try:
+        with pefile.PE(data=tdb.raw, fast_load=True) as parsed:
+            parsed.parse_data_directories(directories=[pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_IMPORT"]])
+            imports = [(dll.dll.lower(), fn.name) for dll in getattr(parsed, "DIRECTORY_ENTRY_IMPORT", ())
+                       for fn in dll.imports if fn.address - parsed.OPTIONAL_HEADER.ImageBase == import_slot]
+    except pefile.PEFormatError as error:
+        raise BuildMismatch("invalid TDB import table") from error
+    if imports != [(b"mediafoundation.dll", copy_export)]:
+        raise BuildMismatch("TDB popup copy does not resolve to MediaFoundation")
+
+    exports = media.exports()
+    code, base = media.text()
+
+    def entry_by_prefix(prefix):
+        matches = [rva for name, rva in exports.items() if name.startswith(prefix)]
+        if len(matches) != 1 or not base <= matches[0] < base + len(code):
+            raise BuildMismatch("MediaFoundation popup accessor missing or ambiguous")
+        return matches[0]
+
+    getter = entry_by_prefix(b"?PF_ParamDefStr_GetParamValueLabel@PF_ParamDefStr@@")
+    setter = entry_by_prefix(b"?PF_ParamDefStr_SetParamValueLabel@PF_ParamDefStr@@")
+    copier = entry_by_prefix(copy_export)
+    decoder = Cs(CS_ARCH_X86, CS_MODE_64)
+    calls = []
+    for ins in decoder.disasm(code[copier - base:copier - base + 480], copier):
+        if ins.mnemonic == "ret":
+            break
+        if ins.bytes[0] == 0xE8 and ins.size == 5:
+            target = ins.address + 5 + struct.unpack("<i", ins.bytes[1:])[0]
+            if target in (getter, setter):
+                calls.append(target)
+    if calls != [getter, setter]:
+        raise BuildMismatch("MediaFoundation popup copy calls changed")
+
+    read_offset = _popup_compare_offset(
+        code[getter - base:getter - base + 170], rb"\x41\x8b\x40\x0c",
+        rb"\x49\x8d\x14\x00\x48\x85\xd2\x0f\x84....\x4c\x8b\x02")
+    write_code = code[setter - base:setter - base + 700]
+    writes = list(re.finditer(
+        rb"\x8b\x42\x0c\x83\xf8\x04\x74\x0a\x83\xf8\x07\x74\x05"
+        rb"\x83\xf8\x0f\x75\x04\x4c\x8d\x6a(.)\x4d\x85\xed\x0f\x84....", write_code, re.S))
+    if (read_offset is None or len(writes) != 1 or read_offset != writes[0][1][0]
+            or not re.search(rb"\x49\x89\x45\x00", write_code[writes[0].end():])
+            or found[1][0] + read_offset != POPUP_FIELD_OFFSET):
+        raise BuildMismatch("MediaFoundation popup option pointer layout changed")
     return POPUP_FIELD_OFFSET
 
 

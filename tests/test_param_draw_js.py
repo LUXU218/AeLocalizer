@@ -26,11 +26,20 @@ def _profile():
 
 class ParamDrawJsTest(unittest.TestCase):
     def test_pre_post_pending_lifetime_and_off(self):
+        self._exercise()
+
+    def test_second_site_return_owns_its_pointer(self):
+        self._exercise(extra=True)
+
+    def _exercise(self, extra=False):
         node = shutil.which("node")
         if not node:
             self.skipTest("node unavailable")
         prof = _profile()
+        extra_site = {key: prof[key] for key in ("pre_bytes", "call_bytes", "ret_bytes")}
+        extra_site.update(pre_rva=0xD03855, call_rva=0xD03866, ret_rva=0xD0386B)
         src = (pdh.JS.replace("__MAP__", json.dumps({"Amount": "强度"}))
+               .replace("__EXTRA_SITES__", json.dumps([extra_site] if extra else []))
                .replace("__TEXT__", "null")
                .replace("__PRE_RVA__", hex(prof["pre_rva"]))
                .replace("__CALL_RVA__", hex(prof["call_rva"]))
@@ -46,7 +55,10 @@ class ParamDrawJsTest(unittest.TestCase):
             harness = os.path.join(os.path.dirname(__file__), "js",
                                    "param_pair_harness.mjs")
             try:
-                proc = subprocess.run([node, "--expose-gc", harness, js],
+                args = [node, "--expose-gc", harness, js]
+                if extra:
+                    args.append(json.dumps(extra_site))
+                proc = subprocess.run(args,
                                       capture_output=True, text=True,
                                       encoding="utf-8", timeout=20)
             except Exception as exc:
@@ -55,7 +67,7 @@ class ParamDrawJsTest(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, detail)
         out = json.loads(proc.stdout.strip().splitlines()[-1])
         self.assertTrue(out["ok"], out)
-        self.assertEqual(out["probe_hooks"], 2)
+        self.assertEqual(out["probe_hooks"], 4 if extra else 2)
         self.assertEqual(out["object_hooks"], 0)
         self.assertEqual(out["leave_traps"], 0)
         self.assertEqual(out["pre_callback_type"], "function")

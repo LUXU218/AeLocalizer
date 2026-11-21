@@ -23,6 +23,7 @@ NAME = "AeLocalizer"
 
 UNUSED_QML = (
     "Qt3D", "QtQuick3D", "QtQuick/Scene2D", "QtQuick/Scene3D",
+    "QtQuick/Timeline", "QtQuick/VirtualKeyboard", "Qt/labs/lottieqt",
     "QtCharts", "QtDataVisualization", "QtGraphs", "QtLocation",
     "QtRemoteObjects", "QtScxml", "QtSensors", "QtTest", "QtTextToSpeech", "QtWebView",
 )
@@ -30,6 +31,7 @@ UNUSED_QT_DLL_PREFIXES = (
     "Qt63D", "Qt6Quick3D", "Qt6Charts", "Qt6DataVisualization", "Qt6Graphs",
     "Qt6Location", "Qt6RemoteObjects", "Qt6Scxml", "Qt6Sensors",
     "Qt6Test", "Qt6TextToSpeech", "Qt6WebView",
+    "Qt6QuickTimeline", "Qt6VirtualKeyboard", "Qt6Lottie",
 )
 
 
@@ -43,14 +45,19 @@ def trim_qt(internal: Path) -> int:
         *(qt / "plugins" / name for name in ("designer", "sqldrivers", "generic", "qmltooling")),
     )
     discard = {file for folder in unused_dirs for file in folder.rglob("*") if file.is_file()}
+    discard.update((qt / "plugins" / "platforminputcontexts").glob("*virtualkeyboard*"))
     discard.update((qt / "resources").glob("*.debug.*"))
     discard.update((qt / "translations").glob("*.qm"))
 
-    candidates = {file.name.lower(): file for file in qt.glob("Qt6*.dll")
-                  if file.name.startswith(UNUSED_QT_DLL_PREFIXES)}
+    candidates = {}
+    for folder in (internal, qt):
+        for file in folder.glob("Qt6*.dll"):
+            if file.name.startswith(UNUSED_QT_DLL_PREFIXES):
+                candidates.setdefault(file.name.lower(), []).append(file)
+    candidate_files = {file for matches in candidates.values() for file in matches}
     pending = [file for file in internal.rglob("*")
                if file.suffix.lower() in (".dll", ".pyd", ".exe")
-               and file not in discard and file not in candidates.values()]
+               and file not in discard and file not in candidate_files]
     imports = ("IMAGE_DIRECTORY_ENTRY_IMPORT", "IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT")
     while pending and candidates:
         binary = PE(str(pending.pop()), fast_load=True)
@@ -58,12 +65,10 @@ def trim_qt(internal: Path) -> int:
             binary.parse_data_directories(directories=[DIRECTORY_ENTRY[name] for name in imports])
             for entry in imports:
                 for dependency in getattr(binary, entry.removeprefix("IMAGE_"), ()):
-                    retained = candidates.pop(dependency.dll.decode("ascii").lower(), None)
-                    if retained is not None:
-                        pending.append(retained)
+                    pending.extend(candidates.pop(dependency.dll.decode("ascii").lower(), ()))
         finally:
             binary.close()
-    discard.update(candidates.values())
+    discard.update(file for matches in candidates.values() for file in matches)
     removed = sum(file.stat().st_size for file in discard)
     for file in discard:
         file.unlink()

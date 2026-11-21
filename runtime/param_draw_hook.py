@@ -49,6 +49,9 @@ var WANT = false, ACTIVE = 0, COUNT = 0, WIRE = 0, MAP_SEQ = 0, MAP_ERR = "";
 var CACHE = {}, CACHE_N = 0, PENDING = {};
 var PRE_RVA = __PRE_RVA__, CALL_RVA = __CALL_RVA__, RET_RVA = __RET_RVA__;
 var PRE_HEX = __PRE_BYTES__, CALL_HEX = __CALL_BYTES__, RET_HEX = __RET_HEX__;
+var DRAW_SITES = [{pre_rva: PRE_RVA, call_rva: CALL_RVA, ret_rva: RET_RVA,
+                   pre_bytes: PRE_HEX, call_bytes: CALL_HEX, ret_bytes: RET_HEX}];
+if (typeof __EXTRA_SITES__ !== 'undefined') DRAW_SITES = DRAW_SITES.concat(__EXTRA_SITES__);
 var SLOT = __SLOT__;
 var SLOT_OK = 0, SLOT_ERR = 0;
 // <<AELOC_OBSERVE_START>>
@@ -108,16 +111,21 @@ function hexAt(addr, n) {
     }
 }
 function checkOriginal() {
-    var pre = hexAt(lib.base.add(PRE_RVA), PRE_HEX.length / 2);
-    var call = hexAt(lib.base.add(CALL_RVA), CALL_HEX.length / 2);
-    var ret = hexAt(lib.base.add(RET_RVA), RET_HEX.length / 2);
-    if (pre !== PRE_HEX) return 'pre:' + pre;
-    if (call !== CALL_HEX) return 'call:' + call;
-    if (ret !== RET_HEX) return 'ret:' + ret;
+    for (var i = 0; i < DRAW_SITES.length; i++) {
+        var site = DRAW_SITES[i];
+        var pre = hexAt(lib.base.add(site.pre_rva), site.pre_bytes.length / 2);
+        var call = hexAt(lib.base.add(site.call_rva), site.call_bytes.length / 2);
+        var ret = hexAt(lib.base.add(site.ret_rva), site.ret_bytes.length / 2);
+        if (pre !== site.pre_bytes) return 'pre@' + site.pre_rva.toString(16) + ':' + pre;
+        if (call !== site.call_bytes) return 'call@' + site.call_rva.toString(16) + ':' + call;
+        if (ret !== site.ret_bytes) return 'ret@' + site.ret_rva.toString(16) + ':' + ret;
+    }
     return '';
 }
 function callIntact() {
-    return hexAt(lib.base.add(CALL_RVA), CALL_HEX.length / 2) === CALL_HEX;
+    return DRAW_SITES.every(function (site) {
+        return hexAt(lib.base.add(site.call_rva), site.call_bytes.length / 2) === site.call_bytes;
+    });
 }
 function mkWS(s) {
     if (CACHE[s]) return CACHE[s];
@@ -136,14 +144,14 @@ function mkWS(s) {
     CACHE_N++;
     return rec;
 }
-function pkey(tid, rsp) { return String(tid) + ':' + rsp.toString(); }
+function pkey(site, tid, rsp) { return String(site) + ':' + tid + ':' + rsp.toString(); }
 function release(key) {
     var p = PENDING[key];
     if (!p) return;
     delete PENDING[key];
     if (p.counted && ACTIVE > 0) ACTIVE--;
 }
-function onPre() {
+function onPre(site) {
     if (!WANT) return;
     try {
         var rsp = this.context.rsp;
@@ -160,7 +168,7 @@ function onPre() {
         noteSeen(stripped);
         var tr = MAP[stripped];
         if (!tr || !tr.length) return;
-        var key = pkey(this.threadId, rsp);
+        var key = pkey(site, this.threadId, rsp);
         if (PENDING[key]) return;          // never overwrite a live invocation
         var keep = mkWS(lead + tr + trail);
         var rec = {obj: keep.obj, buf: keep.buf, orig: orig,
@@ -188,9 +196,9 @@ function onPre() {
         send({error: 'pre:' + String(e)});
     }
 }
-function onPost() {
+function onPost(site) {
     try {
-        var key = pkey(this.threadId, this.context.rsp);
+        var key = pkey(site, this.threadId, this.context.rsp);
         var p = PENDING[key];
         if (!p) return;
         try {
@@ -538,9 +546,11 @@ try {
     // that return trap is invalid and leaks the invocation counter. The
     // function form creates JSProbeListener with on_leave == NULL; our own
     // RET_RVA probe performs restoration/drain.
-    Interceptor.attach(lib.base.add(PRE_RVA), onPre);
+    DRAW_SITES.forEach(function (site) {
+        Interceptor.attach(lib.base.add(site.pre_rva), function () { onPre.call(this, site.call_rva); });
+        Interceptor.attach(lib.base.add(site.ret_rva), function () { onPost.call(this, site.call_rva); });
+    });
     PRE_ON = true;
-    Interceptor.attach(lib.base.add(RET_RVA), onPost);
     POST_ON = true;
     if (!callIntact()) throw new Error('CALL stolen/relocated by interceptor');
     // AE 2026+ name labels: attach the dvaui static-text paint sink. The
@@ -665,6 +675,7 @@ class ParamDrawHook:
         self.profile = {}
         self.text_profile = {}
         self.popup_paint_profile = {}
+        self.popup_profile_error = ""
         self._lock = threading.RLock()
         self._gen = 0
         self._wire = 0
@@ -738,12 +749,19 @@ class ParamDrawHook:
         # Only the 2026 cached control needs this paint supplement. Classic
         # hosts retain typed popup definitions and their native rendering path.
         self.popup_paint_profile = {}
+        self.popup_profile_error = ""
         if self.text_profile:
-            self.popup_paint_profile = popup_draw_profile(dvaui_path)
-            self.popup_paint_profile["menu"] = popup_menu_profile(dvaui_path)
+            try:
+                popup = popup_draw_profile(dvaui_path)
+                popup["menu"] = popup_menu_profile(dvaui_path)
+            except (BuildMismatch, OSError) as exc:
+                self.popup_profile_error = str(exc)[:160]
+            else:
+                self.popup_paint_profile = popup
         import frida
 
         src = (JS.replace("__MAP__", json.dumps(self.mapping, ensure_ascii=False))
+               .replace("__EXTRA_SITES__", json.dumps(profile.get("additional_sites", [])))
                .replace("__POPUP__", json.dumps(self.popup_paint_profile or None, ensure_ascii=False))
                .replace("__TEXT__",
                         json.dumps(self.text_profile or None,

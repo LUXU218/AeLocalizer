@@ -7,6 +7,7 @@ from PySide6.QtCore import QAbstractListModel, QLockFile, QModelIndex, QObject, 
 from core.ai.client import AIError, ChatClient, strip_code_fence
 from core.ai.pipeline import estimate_cost
 from core.panel_localization import panel_localizer as panels
+from core.panel_localization import signed_cep
 from core.panel_localization.panel_files import document, write_json_atomic
 
 
@@ -118,6 +119,7 @@ class PanelController(QObject):
         self._busy = False
         self._status = ""
         self._error = False
+        self._cep_signer = self.folder / "ZXPSignCmd.exe"
 
     @Property(QObject, constant=True)
     def terms(self):
@@ -146,9 +148,26 @@ class PanelController(QObject):
             return ""
         if self.target.kind == "cep" and self.target.identifier.lower().startswith("com.adobe."):
             return "Adobe 内置扩展仅支持查看"
-        if self.target.signed:
-            return "已签名扩展仅支持查看"
         return self.target.reason
+
+    @Property(bool, notify=changed)
+    def usesSignedCopy(self):
+        return bool(self.target and self.target.signed and not self.blockedReason)
+
+    @Property(bool, notify=changed)
+    def hasCepSigner(self):
+        return self._cep_signer.is_file()
+
+    @Slot(QUrl)
+    def chooseCepSigner(self, url):
+        if not self.usesSignedCopy or not url.isLocalFile():
+            return
+        try:
+            self._cep_signer = signed_cep.verified_signer(url.toLocalFile())
+        except (OSError, ValueError) as error:
+            self._status_text(str(error), True)
+            return
+        self.preview()
 
     @Property(bool, notify=changed)
     def canRead(self):
@@ -159,9 +178,13 @@ class PanelController(QObject):
         if not self.canRead or self.blockedReason:
             return False
         try:
+            if self.usesSignedCopy:
+                return signed_cep.is_installed(self.target)
             state = self._localizer().files.state()
             return bool(state and state["status"] != "restored")
         except (OSError, ValueError):
+            if self.usesSignedCopy:
+                return False
             return (self.folder / self.target.key / "recovery" / "transaction.json").is_file()
 
     @Property(bool, notify=changed)
@@ -361,17 +384,26 @@ class PanelController(QObject):
         selected = self._words(selected=True)
         saved = self._words()
         output = destination.toLocalFile() if destination.isLocalFile() else ""
+        signer = self._cep_signer if self.usesSignedCopy else None
+        if signer:
+            if not self.hasCepSigner:
+                self._status_text("安装汉化副本需要 Adobe ZXPSignCmd", True)
+                return
+            selected = {key: text for key, text in selected.items() if key != text}
 
         def job():
-            return list(self._localizer().preview(self.report, selected))
+            return list(self._localizer().preview(self.report, selected, allow_signed=bool(signer)))
 
         def done(paths):
-            self.pending = (selected, saved, output)
+            self.pending = (selected, saved, output, signer)
             self._status_text("预览已生成")
             details = "\n".join(paths)
             if output:
                 details = output
-            self.reviewReady.emit(f"应用 {len(selected)} 条译文到以下文件：\n{details}")
+            message = (f"在当前 Windows 用户下安装包含 {len(selected)} 条译文的 CEP 副本。"
+                       f"\n重启 AE 后，打开菜单中带「简体中文」的面板。\n\n{details}"
+                       if signer else f"应用 {len(selected)} 条译文到以下文件：\n{details}")
+            self.reviewReady.emit(message)
 
         self._task("正在生成预览…", job, done)
 
@@ -379,12 +411,15 @@ class PanelController(QObject):
     def commit(self):
         if self._busy or self.pending is None or self.blockedReason:
             return
-        selected, saved, output = self.pending
+        selected, saved, output, signer = self.pending
         self.pending = None
 
         def job():
             localizer = self._localizer()
             self._save(saved)
+            if signer:
+                menu = signed_cep.install_copy(localizer, self.report, selected, signer)
+                return f"已安装。重启 AE 后，打开「窗口 → 扩展 → {menu}」。"
             if output:
                 localizer.export_jsx(self.report, selected, output)
                 return "汉化副本已生成"
@@ -407,6 +442,10 @@ class PanelController(QObject):
     @Slot()
     def restore(self):
         if not self.canRestore:
+            return
+        if self.usesSignedCopy:
+            self._task("正在移除汉化副本…", lambda: self._write(lambda: signed_cep.remove_copy(self.target)),
+                       lambda _: self._status_text("已移除汉化副本。重启 AE 后可打开原版面板。"))
             return
 
         def done(count):

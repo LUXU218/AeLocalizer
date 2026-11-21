@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 
 const src = fs.readFileSync(process.argv[2], 'utf8');
+const extra = process.argv[3] ? JSON.parse(process.argv[3]) : null;
 let next = 0x100000;
 const heap = new Map();
 const allocations = [];
@@ -51,6 +52,10 @@ const context = {
         [0x400000 + 0xa93eb5]: 'e8665ee4ff',
         [0x400000 + 0xa93eba]: '90488b942480000000',
       };
+      if (extra) {
+        for (const key of ['pre', 'call', 'ret'])
+          lib[0x400000 + extra[key + '_rva']] = extra[key + '_bytes'];
+      }
       if (lib[a]) {
         const hex = lib[a].slice(0, n * 2);
         return new Uint8Array(hex.match(/../g).map(x => parseInt(x, 16)));
@@ -98,12 +103,12 @@ function putWide(str) {
 }
 function slot(rsp) { return new Pointer(rsp + 0x28); }
 function initSlot(rsp, obj) { const h = slot(rsp); h.writePointer(obj); return h; }
-function callPre(tid, rsp) {
-  hooks.get(0xa93ea4).onEnter.call(
+function callPre(tid, rsp, site = 0xa93ea4) {
+  hooks.get(site).onEnter.call(
     {threadId: tid, context: {rsp: new Pointer(rsp)}});
 }
-function callPost(tid, rsp) {
-  hooks.get(0xa93eba).onEnter.call(
+function callPost(tid, rsp, site = 0xa93eba) {
+  hooks.get(site).onEnter.call(
     {threadId: tid, context: {rsp: new Pointer(rsp)}});
 }
 function alive(list) { return list.filter(x => x.ref.deref() !== undefined).length; }
@@ -173,7 +178,19 @@ callPost(4, 0x940000);
 results.activeEnd = rpc.stats().active;
 results.pendingEnd = rpc.stats().pending;
 
-results.ok = results.probe_hooks === 2 && results.object_hooks === 0
+let extraOk = true;
+if (extra) {
+  rpc.mode(true, 3);
+  const obj = putWide('Amount');
+  const at = initSlot(0x950000, obj);
+  callPre(5, 0x950000, extra.pre_rva);
+  callPost(5, 0x950000);
+  const pending = rpc.stats().pending === 1 && !at.readPointer().equals(obj);
+  callPost(5, 0x950000, extra.ret_rva);
+  extraOk = pending && at.readPointer().equals(obj) && rpc.stats().pending === 0;
+}
+
+results.ok = extraOk && results.probe_hooks === (extra ? 4 : 2) && results.object_hooks === 0
   && results.leave_traps === 0
   && results.pre_callback_type === 'function'
   && results.post_callback_type === 'function'

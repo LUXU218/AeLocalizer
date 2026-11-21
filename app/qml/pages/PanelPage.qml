@@ -13,6 +13,7 @@ ColumnLayout {
     property bool scanned: false
     readonly property bool available: !!controller && !controller.busy
     readonly property var terms: controller ? controller.terms : null
+    readonly property bool signedCopy: !!controller && controller.usesSignedCopy
     readonly property bool canApply: available && !controller.blockedReason && terms.readyCount > 0
 
     onVisibleChanged: {
@@ -106,7 +107,8 @@ ColumnLayout {
         Caption {
             Layout.fillWidth: true
             visible: text.length > 0
-            text: page.controller ? page.controller.blockedReason : ""
+            text: page.signedCopy ? "已签名 CEP · 汉化后在 AE 菜单中打开简体中文副本"
+                                  : page.controller ? page.controller.blockedReason : ""
             color: Theme.warn
             wrapMode: Text.Wrap
         }
@@ -150,10 +152,15 @@ ColumnLayout {
                 }
                 Button {
                     objectName: "panelPreview"
-                    text: "预览并应用"
+                    text: page.signedCopy ? "安装汉化副本" : "预览并应用"
                     primary: true
                     enabledButton: page.canApply
-                    onClicked: page.controller.preview()
+                    onClicked: {
+                        if (page.signedCopy && !page.controller.hasCepSigner)
+                            selectSigner.open()
+                        else
+                            page.controller.preview()
+                    }
                 }
                 Button {
                     objectName: "panelExport"
@@ -164,7 +171,7 @@ ColumnLayout {
                 }
                 Button {
                     objectName: "panelRestore"
-                    text: "恢复原文"
+                    text: page.signedCopy ? "移除汉化副本" : "恢复原文"
                     enabledButton: page.available && page.controller.canRestore
                     onClicked: confirmRestore.open()
                 }
@@ -288,6 +295,12 @@ ColumnLayout {
         onAccepted: page.controller.addLocation(selectedFile)
     }
     FileDialog {
+        id: selectSigner
+        title: "选择 Adobe ZXPSignCmd 4.1.103（Windows 64 位）"
+        nameFilters: ["Adobe ZXPSignCmd (ZXPSignCmd.exe)"]
+        onAccepted: page.controller.chooseCepSigner(selectedFile)
+    }
+    FileDialog {
         id: exportScript
         title: "保存汉化副本"
         fileMode: FileDialog.SaveFile
@@ -299,7 +312,7 @@ ColumnLayout {
     Controls.Dialog {
         id: review
         objectName: "panelApplyDialog"
-        title: "应用预览"
+        title: page.signedCopy ? "确认安装汉化副本" : "应用预览"
         parent: Controls.Overlay.overlay
         anchors.centerIn: parent
         implicitWidth: 465
@@ -325,19 +338,20 @@ ColumnLayout {
     Controls.Dialog {
         id: confirmRestore
         objectName: "panelRestoreDialog"
-        title: "恢复原文"
+        title: page.signedCopy ? "移除汉化副本" : "恢复原文"
         parent: Controls.Overlay.overlay
         anchors.centerIn: parent
         implicitWidth: 390
         modal: true
         standardButtons: Controls.Dialog.Ok | Controls.Dialog.Cancel
         onOpened: {
-            standardButton(Controls.Dialog.Ok).text = "恢复"
+            standardButton(Controls.Dialog.Ok).text = page.signedCopy ? "移除" : "恢复"
             standardButton(Controls.Dialog.Cancel).text = "取消"
         }
         onAccepted: page.controller.restore()
         contentItem: Caption {
-            text: "将使用本机备份恢复目标文件。已保存的译文会保留。"
+            text: page.signedCopy ? "将移除当前用户的汉化副本。已保存的译文会保留。"
+                                  : "将使用本机备份恢复目标文件。已保存的译文会保留。"
             wrapMode: Text.Wrap
         }
     }

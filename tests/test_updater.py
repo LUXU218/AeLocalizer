@@ -321,7 +321,7 @@ class TestSettingsUiBackend(unittest.TestCase):
         _settings.save(self._tmpdir, {"update_url": "https://example.net/version.json",
                                      "ui_theme": "dark"})
         b = self.backend_mod.AppBackend()
-        self.assertEqual(b.updateRepository, "")
+        self.assertEqual(b.updateRepository, "LUXU218/AeLocalizer")
         self.assertEqual(b.uiTheme, "dark")
 
     def test_changing_repository_invalidates_download_and_keeps_previous_on_invalid_input(self):
@@ -338,11 +338,14 @@ class TestSettingsUiBackend(unittest.TestCase):
         self.assertEqual(self.b.updateFile, "")
         self.assertEqual(self.b._updateDownloadUrl, "")
 
-    def test_check_update_without_url_errors_sync(self):
-        self.b.setUpdateRepository("")
-        self.b.checkUpdate()
-        self.assertEqual(self.b.updateState, "error")
-        self.assertIn("未配置更新源", self.b.updateText)
+    def test_blank_update_repository_restores_official_release_source(self):
+        from core import settings as _settings
+
+        self.b.setUpdateRepository("Example/AeLocalizer")
+        self.assertTrue(self.b.setUpdateRepository(""))
+        self.assertEqual(self.b.updateRepository, "LUXU218/AeLocalizer")
+        _settings.save(self._tmpdir, {"update_repository": ""})
+        self.assertEqual(self.backend_mod.AppBackend().updateRepository, "LUXU218/AeLocalizer")
 
     def test_app_version_property(self):
         self.assertEqual(self.b.appVersion, APP_VERSION)
@@ -603,6 +606,13 @@ class TestSettingsUiBackend(unittest.TestCase):
         self.assertIn(APP_VERSION, text)
         self.assertIn("数据目录", text)
 
+    def test_diagnostic_uses_current_engine_status(self):
+        from core.engine import EngineStatus
+
+        for running, label in ((True, "运行中"), (False, "未运行")):
+            with mock.patch("core.engine.check", return_value=EngineStatus(running=running)):
+                self.assertIn(f"引擎: {label}", self.b.diagnosticText().splitlines())
+
     def test_data_dir_usage_readable(self):
         s = self.b.dataDirUsage()
         self.assertIn("文件", s)
@@ -774,7 +784,7 @@ class TestSettingsUiBackend(unittest.TestCase):
         os.makedirs(wdir, exist_ok=True)
         cfg_path = os.path.join(we_dir, "config.json")
         with open(cfg_path, "w", encoding="utf-8") as f:
-            _json.dump({"10001": {"version": 5, "wproperties": {}, "keepme": "x"},
+            _json.dump({"4001": {"version": 5, "wproperties": {}, "keepme": "x"},
                         "?installdirectory": we_dir}, f)
         with open(os.path.join(wdir, "project.json"), "w", encoding="utf-8") as f:
             _json.dump({"title": "t", "type": "scene", "file": "scene.pkg",
@@ -814,9 +824,9 @@ class TestSettingsUiBackend(unittest.TestCase):
 
             with open(cfg_path, encoding="utf-8") as fh:
                 after = _json.load(fh)
-            self.assertEqual(after["10001"]["keepme"], "x")
+            self.assertEqual(after["4001"]["keepme"], "x")
             key = os.path.join(b._weItems[0].dir, "scene.pkg").replace("\\", "/")
-            mon = after["10001"]["wproperties"][key]["Monitor0"]
+            mon = after["4001"]["wproperties"][key]["Monitor0"]
             self.assertIs(mon["flag"], False)
             self.assertEqual(mon["lvl"], 1)
             self.assertEqual(mon["mode"], "1")
@@ -848,7 +858,7 @@ class TestSettingsUiBackend(unittest.TestCase):
             with open(cfg_path, encoding="utf-8") as fh:
                 after = _json.load(fh)
             key = os.path.join(b._weItems[0].dir, "scene.pkg").replace("\\", "/")
-            self.assertIs(after["10001"]["wproperties"][key]["Monitor0"]["flag"], False)
+            self.assertIs(after["4001"]["wproperties"][key]["Monitor0"]["flag"], False)
         finally:
             b.shutdown()
 

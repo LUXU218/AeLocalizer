@@ -134,6 +134,20 @@ class AutoEngineRestoreTest(unittest.TestCase):
             self.b._auto_restore_engine_async()
         self.assertFalse(st.called)
 
+    def test_new_adaptation_restarts_only_outdated_managed_engine(self):
+        self._inv()
+        with mock.patch.object(engine_mod, "engine_running", return_value=True), \
+                mock.patch.object(engine_mod, "find_guard", return_value=("g", "")), \
+                mock.patch("core.guardruntime.managed_code_outdated", side_effect=[False, True]), \
+                mock.patch.object(self.b, "_send_language_control") as control, \
+                mock.patch.object(self.b, "startEngine") as start:
+            self.b._auto_restore_engine_async(refresh_runtime=True)
+            self.assertEqual(control.call_count, 1)
+            self.assertFalse(start.called)
+            self.b._auto_restore_engine_async(refresh_runtime=True)
+            self.assertEqual(control.call_count, 1)
+            self.assertEqual(start.call_count, 1)
+
     def test_engine_running_requires_confirmed_guard(self):
         old = engine_mod._STOPPED_AT
         engine_mod._STOPPED_AT = 0.0

@@ -114,6 +114,19 @@ def can_auto_upgrade(data_root: str) -> bool:
             and bool(old.get("template_sha256")))
 
 
+def managed_code_outdated(data_root: str) -> bool:
+    """Identify an older, project-owned runtime that needs a graceful restart."""
+    try:
+        with open(_manifest_path(data_root), encoding="utf-8") as handle:
+            installed = json.load(handle)
+        return (isinstance(installed, dict)
+                and installed.get("source") == "project-template"
+                and bool(installed.get("template_sha256"))
+                and installed.get("deps_sha256") != _source_deps_sha())
+    except (OSError, ValueError):
+        return False
+
+
 def ensure_runtime(data_root: str, source_guard: str = "", *,
                    force: bool = False) -> dict:
     """从项目模板原子部署 managed runtime；不接受外部 guard 作为源。"""

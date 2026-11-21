@@ -346,6 +346,16 @@ ColumnLayout {
                         card.refreshChecks()
                     }
                 }
+
+                Button {
+                    visible: modelData.label === "已勾选插件" && !modelData.ok
+                    text: "启用第三方插件汉化"
+                    enabledButton: !card.busy && !!card.backend && card.backend.dictCount > 0
+                    onClicked: {
+                        card.backend.enableRuntimeSelection()
+                        card.refreshChecks()
+                    }
+                }
             }
         }
 

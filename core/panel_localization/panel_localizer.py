@@ -7,6 +7,7 @@ import codecs,json,os,re,tempfile,xml.etree.ElementTree as ET
 from .panel_files import Files,inside,digest,document
 from .panel_files import write_json_atomic
 from . import jsx_labels, panel_cache
+from .signed_cep import COPY_PREFIX
 
 OVERLAY='.ae-localizer-ui.js'
 MARK='<!-- ae-localizer-ui-v1 -->'
@@ -114,7 +115,10 @@ def discover(executables=(),extra=(),cancelled=lambda:False):
     result={};warnings=[]
     for p in candidates:
         if cancelled():raise RuntimeError('已取消发现')
-        try:t=inspect(p);result[t.key]=t
+        try:
+            t=inspect(p)
+            if not (t.kind == 'cep' and t.identifier.startswith(COPY_PREFIX)):
+                result[t.key]=t
         except (ValueError,OSError,ET.ParseError) as error:warnings.append(Path(p).name+'：'+str(error))
     return sorted(result.values(),key=lambda t:(t.kind,t.name.casefold(),t.root)),warnings
 

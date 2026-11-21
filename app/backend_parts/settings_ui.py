@@ -20,7 +20,7 @@ import urllib.parse
 
 from PySide6.QtCore import Property, QTimer, QUrl, Signal, Slot
 from core import updater as _updater
-from core.version import APP_VERSION
+from core.version import APP_VERSION, DEFAULT_UPDATE_REPOSITORY
 from app.backend_parts.worker import Worker
 
 #: 个性化项的三个枚举档位（2026-11-16 设置页改版）。
@@ -69,9 +69,9 @@ class SettingsUiMixin:
                 self._uiTheme = mode
             try:
                 self._updateRepository = _updater.normalize_github_repository(
-                    str(obj.get("update_repository") or ""))
+                    str(obj.get("update_repository") or "")) or DEFAULT_UPDATE_REPOSITORY
             except ValueError:
-                self._updateRepository = ""
+                self._updateRepository = DEFAULT_UPDATE_REPOSITORY
             img = str(obj.get("bg_image") or "").strip()
             if img and os.path.isfile(img):
                 self._bgImage = img
@@ -523,7 +523,7 @@ class SettingsUiMixin:
         if self._updateState in ("checking", "downloading", "installing"):
             return False
         try:
-            repository = _updater.normalize_github_repository(value)
+            repository = _updater.normalize_github_repository(value) or DEFAULT_UPDATE_REPOSITORY
         except ValueError:
             return False
         if repository == self._updateRepository:
@@ -824,7 +824,7 @@ class SettingsUiMixin:
             from core import engine as _engine
 
             st = _engine.check(getattr(self, "_root", ""), getattr(self, "_version", ""))
-            lines.append("引擎: %s" % ("运行中" if getattr(self, "_engineRunning", False) else "未运行"))
+            lines.append("引擎: %s" % ("运行中" if st.running else "未运行"))
             lines.append("引擎词典: %d 条" % int(getattr(st, "engine_dict_entries", 0) or 0))
         except Exception:
             lines.append("引擎: 读取失败")

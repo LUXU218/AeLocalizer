@@ -27,4 +27,14 @@ class PopupPaintSelectionTests(unittest.TestCase):
             self.assertTrue(hook.attach());self.assertEqual(get.call_count,1)
         self.assertEqual(hook.popup_paint_profile['known_version'],'26.5.0.89')
 
+    def test_unverified_menu_does_not_block_parameter_hook(self):
+        hook, agent = self.setup_hook(2026)
+        with mock.patch.dict(sys.modules, {'frida': agent}), \
+                mock.patch.object(ph, 'popup_menu_profile',
+                                  side_effect=ph.BuildMismatch('popup menu evidence differs')):
+            self.assertTrue(hook.attach())
+        self.assertTrue(hook.text_profile)
+        self.assertEqual(hook.popup_paint_profile, {})
+        self.assertEqual(hook.popup_profile_error, 'popup menu evidence differs')
+
 if __name__=='__main__':unittest.main(verbosity=2)

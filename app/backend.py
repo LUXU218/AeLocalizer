@@ -13,6 +13,7 @@ import re
 import sys
 import threading
 import time
+from dataclasses import replace
 from typing import Dict, List, Optional
 
 from PySide6.QtCore import (
@@ -364,7 +365,9 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
         # ---- 设置页状态（2026-11-01：主题 / 更新 / 背景图）----
         # ★ 主题默认 light = 历史外观；绝不启动时自动联网检查更新。
         self._uiTheme = "light"          # light | dark | system
-        self._updateRepository = ""
+        from core.version import DEFAULT_UPDATE_REPOSITORY
+
+        self._updateRepository = DEFAULT_UPDATE_REPOSITORY
         self._updateState = ""
         self._updateText = ""
         self._updateLatest = ""
@@ -492,6 +495,9 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
         self._liveHookTickBusy = False       # 看护拍挂钩线程在飞
         self._liveHookStatsAt = 0.0          # 统计 5 秒节流
         self._liveNudgeAt = 0.0              # 轻推 0.6 秒节流
+        self._liveHostProbe = None
+        self._liveHostProbeAt = 0.0
+        self._liveHostSnapshot = None
         self._liveAutoEnabled = self._live_auto_allowed()
         if self._liveAutoEnabled:
             # 启动静默预扫：三通道开关与自动补写都依赖插件清单（_inv），
@@ -515,7 +521,7 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
             #   _liveWatchTick 在 Qt 主线程应用，避免 cross-thread setInterval
             #   直接让 watchdog 停摆（真机 tick 只有首行即此因）。
             self._liveWatchWantInterval = 60
-            self._liveWatch.timeout.connect(self._liveWatchTick)
+            self._liveWatch.timeout.connect(self._poll_live_watch)
             self._liveWatch.start()
 
     # ---------------------------------------------------------- 属性
@@ -1403,8 +1409,7 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
 
         def done(inv):
             self._inv = inv
-            sel = os.path.join(DATA_ROOT, "selection-%s.json" % self._version)
-            load_selection(sel, inv)
+            self._restore_plugin_selection(inv)
             self._normalize_language_channels()
             self._apply_lang_intent()
             self._status = "扫描完成:%d 组 / %d 文件" % (len(inv.groups), inv.scanned_files)
@@ -1447,6 +1452,17 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
                     self._inv)
         except Exception:
             pass
+
+    def _restore_plugin_selection(self, inv) -> None:
+        selection = os.path.join(DATA_ROOT, "selection-%s.json" % self._version)
+        if os.path.exists(selection):
+            load_selection(selection, inv)
+        elif self._store.resolve():
+            # Match the scope of the explicit third-party selection button.
+            for group in inv.groups:
+                group.selected = not group.builtin_adobe
+            if inv.selected():
+                self._saveSelectionNow()
 
     @Slot(bool, bool, bool, result=int)
     def setAllChannels(self, effect: bool, param: bool, enum: bool) -> int:
@@ -1640,8 +1656,9 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
     @Property(str, notify=stateChanged)
     def languageStatusText(self):
         st = engine.control_status()
+        adapt = getattr(self, "_autoAdaptStatus", "")
         if not st:
-            return "语言控制面未就绪"
+            return adapt or "语言控制面未就绪"
         err = str(st.get("error") or "")
         # 行未处理完 / 后台首轮发现未完成是正常进度，不是写入异常。
         progress = (err.startswith("row-pass-pending:")
@@ -1649,7 +1666,7 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
         if err and not progress:
             low = err.lower()
             if "afterfxlib build not verified" in low:
-                return "参数通道：当前 AE build 未适配（已安全拒写，详见诊断）"
+                return adapt or "参数通道：当前 AE build 未适配（已安全拒写，详见诊断）"
             if "dvaui text build not verified" in low:
                 return "语言通道（参数+文本）：dvaui 构建未验证（整通道未启用，已安全拒写，详见诊断）"
             if "flt build not verified" in low:
@@ -1675,10 +1692,10 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
             text_skip_invalid = int(ds.get("text_skip_invalid") or 0)
             text_skip_capacity = int(ds.get("text_skip_capacity") or 0)
             draw_replaced = int(ds.get("replaced") or 0)
+            rendered = "参数名" if st.get("popup_error") else "参数/下拉"
             if text_enabled:
                 if text_replaced > 0 and text_err == 0:
-                    text = ("当前已发现的参数/下拉已显示中文" if background
-                            else "参数/下拉已显示中文")
+                    text = ("当前已发现的" if background else "") + rendered + "已显示中文"
                 elif text_err > 0:
                     text = "参数通道已就绪；文本标签替换异常 %d（详见诊断）" % text_err
                 elif text_hits > 0 and text_skip_capacity > 0:
@@ -1691,8 +1708,7 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
                 if text_err == 0 and text_skip_invalid > 0:
                     text += "；文本标签无效跳过 %d" % text_skip_invalid
             elif draw_replaced > 0:
-                text = ("当前已发现的参数/下拉已显示中文" if background
-                        else "参数/下拉已显示中文")
+                text = ("当前已发现的" if background else "") + rendered + "已显示中文"
             else:
                 text = "参数通道已就绪（等待首次绘制确认）"
             if mode != "on":
@@ -1720,8 +1736,8 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
                 else:
                     # ON 时 popup 也可能“先写入过、refresh("on") 瞬态失败后被 drop”，
                     # 因此不能声称"已安全拒写"（reviewer delta-5 低危残留）。
-                    text += ("；下拉通道不可用：%s（详见诊断；如面板仍为中文，"
-                             "请重开 AE）" % str(st.get("popup_error"))[:60])
+                    popup_error = getattr(self, "_autoAdaptPopupError", "") or st["popup_error"]
+                    text += "；下拉通道不可用：%s" % str(popup_error)[:150]
             if background:
                 text += "，正在检查新增效果…"
             return text
@@ -1744,14 +1760,14 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
         try:
             from core import proc as _proc
 
-            procs = _proc.list_ae_processes()
+            procs = _proc.list_ae_hosts()
         except Exception:
             text = "运行 AE：无法读取进程信息"
         else:
             if not procs:
                 text = "运行 AE：未运行"
             elif len(procs) != 1:
-                text = "运行 AE：检测到 %d 个实例，实时写入不可用" % len(procs)
+                text = "运行 AE：检测到 %d 个候选进程，请只保留一个 AE 编辑窗口" % len(procs)
             else:
                 ver = str(procs[0].get("fileVersion") or "")
                 text = "运行 AE：%s" % (ver or "未知版本")
@@ -1811,6 +1827,20 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
         self._syncGroupModel(reset=False)
         self.stateChanged.emit()
         self.toast.emit("info", "已取消全部勾选")
+
+    @Slot()
+    def enableRuntimeSelection(self):
+        if not self._inv or self._engineBusy or not self._store.resolve():
+            return
+        self.selectAll()
+        if not self._inv.selected():
+            return
+        self._saveSelectionNow()
+        self._engine_intent_set(True)
+        if engine.engine_running():
+            self._reload_engine_channels(allow_empty=True)
+        else:
+            self.startEngine()
 
     @Slot()
     def pickEffectsFile(self):
@@ -2378,7 +2408,7 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
                     continue
         return out
 
-    def _write_param_identity(self) -> str:
+    def _write_param_identity(self, procs=None) -> str:
         """把 AE/插件 hash 配置交给 managed runtime（非全局选中集合）。
 
         ``ae_version`` 是 UI 选中/保存的安装版本（兼容旧字段），
@@ -2391,7 +2421,8 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
         try:
             from core import proc as _proc
 
-            procs = _proc.list_ae_processes()
+            if procs is None:
+                procs = _proc.list_ae_hosts()
             if len(procs) == 1:
                 host_ver = str(procs[0].get("fileVersion") or "")
         except Exception:
@@ -2419,7 +2450,7 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
                 time.sleep(0.02)
         return p
 
-    def _auto_restore_engine_async(self) -> None:
+    def _auto_restore_engine_async(self, *, refresh_runtime: bool = False, refresh_popup: bool = False) -> None:
         """工具启动/扫描后，若持久化选区仍开着参数/下拉通道但 guard 不在，
         自动恢复一次引擎；不碰效果名通道，也不每拍重试。"""
         if not self._live_auto_allowed():
@@ -2427,7 +2458,7 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
         now = time.monotonic()
         if getattr(self, "_engineBusy", False):
             return
-        if (now - float(getattr(self, "_engineAutoTriedAt", 0.0))) < 30.0:
+        if not refresh_runtime and (now - float(getattr(self, "_engineAutoTriedAt", 0.0))) < 30.0:
             return
         if not self._inv:
             return
@@ -2442,8 +2473,11 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
                 # managed runtime 已存活：即便 guard 已有旧 host，也必须把
                 # 当前唯一 AE 的新 host + 最后语言 intent 送到控制面，不能
                 # 仅因 engine_running 就跳过重连。
-                self._send_language_control()
-                return
+                old_runtime = refresh_runtime and guardruntime.managed_code_outdated(engine.DATA_ROOT)
+                popup_disabled = refresh_popup and bool(engine.control_status().get("popup_error"))
+                if not (old_runtime or popup_disabled):
+                    self._send_language_control()
+                    return
         except Exception:
             return
         gp, _why = engine.find_guard()
@@ -2465,12 +2499,13 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
             self._engineAutoTried = False
             self._engineRestoreQuiet = False
 
-    def _send_language_control(self) -> bool:
+    def _send_language_control(self, procs=None) -> bool:
         """把当前唯一 AE host + 持久/最后 intent 发给 managed control。"""
         try:
             from core import proc as _proc
 
-            procs = _proc.list_ae_processes()
+            if procs is None:
+                procs = _proc.list_ae_hosts()
             if len(procs) != 1:
                 return False
             p = procs[0]
@@ -2505,7 +2540,7 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
                         os.path.normcase(host["image"])):
                     return True
             try:
-                self._write_param_identity()
+                self._write_param_identity(procs)
             except Exception:
                 pass
             ok = bool(engine.send_control(mode, int(self._langGen), host))
@@ -4307,7 +4342,7 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
         try:
             from core import proc as _proc
 
-            procs = _proc.list_ae_processes()
+            procs = _proc.list_ae_hosts()
         except Exception:
             return None
         if not procs:
@@ -4367,8 +4402,7 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
             if self._inv or not inv:
                 return
             self._inv = inv
-            sel = os.path.join(DATA_ROOT, "selection-%s.json" % self._version)
-            load_selection(sel, inv)
+            self._restore_plugin_selection(inv)
             self._normalize_language_channels()
             self._apply_lang_intent()
             self._status = "已就绪：%d 组 / %d 文件（启动自动扫描）" % (
@@ -4380,7 +4414,33 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
 
         self._run(work, done, _busy_text="正在准备插件清单…")
 
-    def _liveWatchTick(self) -> None:
+    def _poll_live_watch(self) -> None:
+        """Refresh the host list off the GUI thread while keeping the existing watch cadence."""
+        if self._liveShutdown or getattr(self, "_windowResizing", False):
+            return
+        now = time.monotonic()
+        probe = self._liveHostProbe
+        if now >= self._liveHostProbeAt and (probe is None or not probe.is_alive()):
+            self._liveHostProbeAt = now + 0.25
+
+            def read_hosts():
+                try:
+                    from core import proc
+
+                    self._liveHostSnapshot = (now + 0.75, proc.list_ae_hosts())
+                except Exception:
+                    self._liveHostSnapshot = None
+
+            self._liveHostProbe = threading.Thread(target=read_hosts, name="aeloc-host-probe", daemon=True)
+            try:
+                self._liveHostProbe.start()
+            except RuntimeError:
+                self._liveHostProbe = None
+        snapshot = self._liveHostSnapshot
+        if snapshot is not None and now < snapshot[0]:
+            self._liveWatchTick(snapshot[1])
+
+    def _liveWatchTick(self, procs=None) -> None:
         """效果名通道的常驻换名（0.4 秒一拍，只在真实环境启动）。
 
         语义：开关开着 = 持续生效。每一拍都把「内存里现在有哪些效果实例」与
@@ -4427,9 +4487,9 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
         if time.monotonic() - getattr(self, "_lastLangCheckAt", 0.0) >= 2.0:
             self._lastLangCheckAt = time.monotonic()
             try:
-                self._send_language_control()
-                if getattr(self, "_langWant", False):
-                    self._auto_adapt_async(self._running_ae_version())
+                self._send_language_control(procs)
+                if any(self.channelState()[:2]):
+                    self._auto_adapt_async(self._running_ae_version(procs), hosts=procs)
             except Exception:
                 pass
         if self._busy or self._engineBusy or not self._inv:
@@ -4497,7 +4557,8 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
         from core import proc as _proc
 
         try:
-            procs = _proc.list_ae_processes()
+            if procs is None:
+                procs = _proc.list_ae_hosts()
         except Exception:
             return
         if not procs:
@@ -5454,7 +5515,8 @@ if (f) { f.open('w'); f.write(r); f.close(); }
                 return {"cancelled": True, "written": 0, "records": []}
             # ★ 自愈(2026-10-28):构建没适配就先自动适配,再写入 —— 用户
             #   不需要先去引擎卡点「自动识别与适配」
-            self._ensure_adapted()
+            if intent_gen is None:
+                self._ensure_adapted()
             if _cancelled():
                 return {"cancelled": True, "written": 0, "records": []}
             _t1 = time.monotonic()
@@ -5848,12 +5910,13 @@ if (f) { f.open('w'); f.write(r); f.close(); }
 
     # ---- 自动适配(2026-10-28,用户要求「自动适配 ae 版本」)----
 
-    def _running_ae_version(self) -> str:
+    def _running_ae_version(self, procs=None) -> str:
         """唯一运行中 AE 的构建号;没有/多个返回空串。"""
         try:
             from core import proc
 
-            procs = proc.list_ae_processes()
+            if procs is None:
+                procs = proc.list_ae_hosts()
             return procs[0].get("fileVersion") or "" if len(procs) == 1 else ""
         except Exception:
             return ""
@@ -5877,14 +5940,19 @@ if (f) { f.open('w'); f.write(r); f.close(); }
 
         from core import proc as _proc
 
-        procs = _proc.list_ae_processes()
+        procs = _proc.list_ae_hosts()
         if len(procs) != 1:
             raise RuntimeError("需要恰好一个运行中的 AE 才能自动适配"
                                "(当前 %d 个)" % len(procs))
         exe = procs[0]["image"]
+        try:
+            _proc.main_window(procs[0]["pid"])
+        except RuntimeError:
+            return {"loading": True}
         from runtime import build_profile
         from core import paramnative
 
+        cached = None
         with _proc.Process(procs[0]["pid"], write=False) as p:
             if p.creation_time != procs[0]["creation_time"]:
                 raise RuntimeError("AE 在适配期间发生变化，请重试")
@@ -5897,15 +5965,29 @@ if (f) { f.open('w'); f.write(r); f.close(); }
                 digest = _proc.module_digest(p, flt["path"])
                 version = _proc.file_version(p.image)
                 if _adapter.is_supported(version, digest, DATA_ROOT):
-                    if (build_profile.known_version(
-                            "afterfxlib", _proc.module_digest(p, draw["path"]))
-                            or _adapter.adapted_runtime_profile(p, modules.values(), DATA_ROOT)):
+                    cached = _adapter.adapted_runtime_profile(p, modules.values(), DATA_ROOT)
+                    known_draw = build_profile.known_version("afterfxlib", _proc.module_digest(p, draw["path"]))
+                    tdb = modules.get("tdb.dll")
+                    if build_profile.known_version("flt", digest) and (known_draw or cached):
                         return {}
+                    if (cached and cached.popup_layout_verified and tdb
+                            and _proc.module_digest(p, tdb["path"]) == cached.tdb_sha):
+                        media = modules.get("mediafoundation.dll")
+                        if (not cached.popup_media_sha or (media and
+                                _proc.module_digest(p, media["path"]) == cached.popup_media_sha)):
+                            return {}
 
         report = aescan.analyze_install(exe)
         if report.get("state") != "candidate":
-            raise RuntimeError(report.get("summary") or "静态识别失败")
+            return {"blocked": report.get("summary") or "静态识别失败"}
         profile = aescan.candidate_from_report(report)
+        popup_only = bool(cached and cached.root_vtable and cached.count_get
+                          and cached.tdb_sha and cached.tdb_sha == profile.tdb_sha
+                          and cached.parameter_draw_sha == profile.parameter_draw_sha
+                          and cached.flt_sha == profile.flt_sha)
+        popup_error = report.get("popupLayoutError", "")
+        if popup_only and not profile.popup_layout_verified:
+            return {"popup_blocked": popup_error or "下拉布局未通过校验"}
         with _proc.Process(procs[0]["pid"], write=False) as p:
             if (p.creation_time != procs[0]["creation_time"]
                     or os.path.normcase(p.image) != os.path.normcase(exe)
@@ -5917,68 +5999,98 @@ if (f) { f.open('w'); f.write(r); f.close(); }
                 raise RuntimeError("运行中的 AE 里没有 FLT.dll")
             if _proc.module_digest(p, flt["path"]) != profile.flt_sha:
                 raise RuntimeError("运行中的 AE 与扫描的安装文件不同，请重试")
-            catalog = paramnative.probe_catalog(p, timeout=150)
+            if not popup_only:
+                catalog = paramnative.probe_catalog(p, timeout=60)
             p.ensure_alive()
+            hosts = _proc.list_ae_hosts()
+            if len(hosts) != 1 or hosts[0] != procs[0]:
+                raise RuntimeError("AE 编辑会话在适配期间发生变化，将自动重试")
             loaded = {m["name"].casefold(): m for m in p.modules()}
             for mod, expected in (("flt.dll", profile.flt_sha),
                                   ("afterfxlib.dll", profile.parameter_draw_sha),
-                                  ("tdb.dll", profile.tdb_sha)):
+                                  ("tdb.dll", profile.tdb_sha),
+                                  ("mediafoundation.dll", profile.popup_media_sha)):
                 if not expected:
                     continue
                 m = loaded.get(mod)
                 if (not m or m != modules.get(mod)
+                        or os.path.normcase(os.path.dirname(m["path"])) != os.path.normcase(os.path.dirname(flt["path"]))
                         or _proc.module_digest(p, m["path"]) != expected):
                     raise RuntimeError("AE 模块在适配期间不一致：" + mod)
-            layout = _adapter.adopt_candidate(p, flt["base"], profile,
-                                              catalog, DATA_ROOT)
+            if popup_only:
+                _adapter.save_local(DATA_ROOT, {cached.version: replace(
+                    cached, popup_layout_verified=True, popup_media_sha=profile.popup_media_sha)})
+                layout = {"offset": cached.registry_vector, "encoding": cached.encoding}
+            else:
+                layout = _adapter.adopt_candidate(p, flt["base"], profile, catalog, DATA_ROOT)
             return {"adopted": True, "version": profile.version,
                     "scope": bool(report.get("paramsSupported")),
+                    "parameter_draw_error": report.get("parameterDrawError", ""),
+                    "popup_error": popup_error, "popup_upgraded": popup_only,
                     "offset": layout["offset"], "encoding": layout["encoding"]}
 
-    def _auto_adapt_memo_ok(self, host) -> bool:
-        """每个 AE 会话自动尝试一次，重开 AE 后可以重试。"""
-        memo = getattr(self, "_autoAdaptTried", None)
-        if memo is None:
-            memo = set()
-            self._autoAdaptTried = memo
-        if host in memo:
-            return False
-        memo.add(host)
-        return True
-
-    def _auto_adapt_async(self, version: str, force: bool = False) -> None:
-        """后台自动适配:已适配/AE 没开/忙/试过 → 静默跳过。
-
-        ★ AE 没开不算失败(不进备忘),开起来后的下一个触发点会再试;
-          真正的尝试失败才记备忘,提示一次。"""
-        if not version or self._busy:
+    def _auto_adapt_async(self, version: str, force: bool = False, *, hosts=None) -> None:
+        """Verify one live AE session in the background, with bounded retry frequency."""
+        if (not version or self._busy or getattr(self, "_liveShutdown", False)
+                or getattr(self, "_autoAdaptRunning", False)):
             return
-        if not force:
-            from core import adapter as _adapter, proc
+        if hosts is None:
+            from core import proc
 
-            hosts = proc.list_ae_processes()
-            if len(hosts) != 1 or hosts[0].get("fileVersion") != version:
-                return
-            host = hosts[0]
-            key = (host["pid"], host["creation_time"], host["image"])
-            if not self._auto_adapt_memo_ok(key):
-                return
+            hosts = proc.list_ae_hosts()
+        if len(hosts) != 1 or hosts[0].get("fileVersion") != version:
+            return
+        host = hosts[0]
+        key = (host["pid"], host["creation_time"], host["image"])
+        if key != getattr(self, "_autoAdaptKey", None):
+            self._autoAdaptKey = key
+            self._autoAdaptNext = 0.0
+            self._autoAdaptStatus = ""
+            self._autoAdaptPopupError = ""
+        if not force and time.monotonic() < self._autoAdaptNext:
+            return
+        self._autoAdaptRunning = True
 
         def work():
             return self._adapt_running_ae(force=force)
 
+        def failed(message):
+            self._autoAdaptRunning = False
+            self._autoAdaptNext = time.monotonic() + 30.0
+            detail = (message.strip().splitlines() or ["目录验证失败"])[0][:150]
+            status = f"AE {version} 适配等待重试：{detail}"
+            if self._autoAdaptStatus != status:
+                self._live_watch_log(status)
+                self._autoAdaptStatus = status
+                self.stateChanged.emit()
+
         def done(res):
-            if res.get("loading") and not force:
-                self._autoAdaptTried.discard(key)
+            self._autoAdaptRunning = False
+            self._autoAdaptNext = float("inf")
+            self._autoAdaptStatus = ""
+            self._autoAdaptPopupError = res.get("popup_blocked") or res.get("popup_error", "")
+            if res.get("loading"):
+                self._autoAdaptNext = time.monotonic() + 2.0
+            elif res.get("blocked"):
+                self._autoAdaptStatus = f"AE {version} 适配未通过：{res['blocked']}"
+                self._live_watch_log(self._autoAdaptStatus)
             elif res.get("adopted"):
+                reason = res.get("parameter_draw_error")
+                if reason:
+                    self._autoAdaptStatus = f"AE {version} 参数名绘制校验未通过：{reason}"
+                self._live_watch_log(self._autoAdaptStatus or "已自动适配 AE " + res["version"])
                 self.toast.emit(
-                    "info", "已自动适配 %s(编码 %s)——「实时写入」可用"
+                    "warn" if reason else "info",
+                    self._autoAdaptStatus or "已验证 AE %s 的本机适配（编码 %s）"
                     % (res["version"], res["encoding"]))
-            elif res.get("message"):
-                self.toast.emit("warn", res["message"])
+                if reason:
+                    QTimer.singleShot(0, self._auto_restore_engine_async)
+                else:
+                    QTimer.singleShot(0, lambda: self._auto_restore_engine_async(
+                        refresh_runtime=True, refresh_popup=bool(res.get("popup_upgraded"))))
             self.stateChanged.emit()
 
-        self._run(work, done, _busy_text="正在自动适配 %s…" % version)
+        self._run(work, done, _silent=True, _toast_fail=False, _on_fail=failed)
 
     def _ensure_adapted(self) -> None:
         """实时写入路径的自愈(在工作线程调):没适配就先自动适配,
@@ -5991,6 +6103,8 @@ if (f) { f.open('w'); f.write(r); f.close(); }
         if _adapter.is_supported(version, data_root=DATA_ROOT):
             return
         res = self._adapt_running_ae()
+        if res.get("blocked"):
+            raise RuntimeError(res["blocked"])
         if res.get("adopted"):
             self.toast.emit("info", "已自动适配 %s(编码 %s)"
                             % (res["version"], res["encoding"]))

@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 from dataclasses import replace
@@ -5,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from core import adapter
+from core import adapter, aescan, proc
 from core import livenames
 from runtime import build_profile
 
@@ -66,3 +67,59 @@ class ClassicPopupAbiTest(unittest.TestCase):
         if not module.is_file():
             self.skipTest("AE 2022 not installed")
         self.assertEqual(build_profile.popup_field_layout(module), build_profile.POPUP_FIELD_OFFSET)
+
+    def test_classic_abi_accepts_direct_type_comparisons(self):
+        module = Path(r"C:\Program Files\Adobe\Adobe After Effects 2024\Support Files\TDB.dll")
+        if not module.is_file():
+            self.skipTest("AE 2024 not installed")
+        self.assertEqual(build_profile.popup_field_layout(module), build_profile.POPUP_FIELD_OFFSET)
+
+    def test_real_minor_build_proves_both_popup_modules(self):
+        root = os.environ.get("AELOC_TEST_MINOR_POPUP_DIR")
+        if not root:
+            self.skipTest("set AELOC_TEST_MINOR_POPUP_DIR to AE 24.6.2.x FLT.dll and TDB.dll")
+        root = Path(root)
+        flt = build_profile.popup_profile(root / "FLT.dll", allow_unknown=True)
+        self.assertEqual(flt["field_offset"], build_profile.POPUP_FIELD_OFFSET)
+        tdb = root / "TDB.dll"
+        self.assertEqual(build_profile.popup_field_layout(tdb), flt["field_offset"])
+
+        image = build_profile.PEImage(tdb)
+        writer, = [rva for name, rva in image.exports().items() if name.startswith(b"?PF_ParamDef_SetParamName@@")]
+        changed = bytearray(image.raw)
+        start = image.raw_offset(writer)
+        field = changed.index(bytes.fromhex("b840000000488d1c08"), start, start + 100)
+        changed[field + 1] = 0x48
+        image.raw = bytes(changed)
+        with patch.object(build_profile, "PEImage", return_value=image):
+            with self.assertRaisesRegex(build_profile.BuildMismatch, "popup option pointer layout changed"):
+                build_profile.popup_field_layout(tdb)
+
+
+class DelegatedPopupAbiTest(unittest.TestCase):
+    def test_media_layout_matches_installed_2025(self):
+        root = Path(r"C:\Program Files\Adobe\Adobe After Effects 2025\Support Files")
+        tdb, media = root / "TDB.dll", root / "MediaFoundation.dll"
+        if not tdb.is_file() or not media.is_file():
+            self.skipTest("AE 2025 reference build unavailable")
+        self.assertEqual(build_profile.media_popup_field_layout(tdb, None, media, None),
+                         build_profile.POPUP_FIELD_OFFSET)
+
+    def test_real_new_minor_adopts_complete_module_evidence(self):
+        value = os.environ.get("AELOC_TEST_MODERN_MINOR_DIR")
+        if not value:
+            self.skipTest("set AELOC_TEST_MODERN_MINOR_DIR to the supplied 25.6.4.3 module directory")
+        root = Path(value)
+        with patch.object(proc, "file_version", return_value="25.6.4.3"):
+            report = aescan.analyze_install(root / "AfterFX.exe")
+        profile = aescan.candidate_from_report(report)
+        self.assertTrue(profile.popup_layout_verified)
+        self.assertFalse(build_profile.known_version("afterfxlib", profile.parameter_draw_sha))
+        self.assertFalse(build_profile.known_version("flt", profile.flt_sha))
+        media = root / "MediaFoundation.dll"
+        self.assertEqual(profile.popup_media_sha, build_profile.sha256_file(media))
+        with tempfile.TemporaryDirectory() as temp:
+            adapter.save_local(temp, {profile.version: profile})
+            self.assertEqual(adapter.load_local(temp)[profile.version], profile)
+        with self.assertRaisesRegex(build_profile.BuildMismatch, "sha256 mismatch"):
+            build_profile.media_popup_field_layout(root / "TDB.dll", profile.tdb_sha, media, "0" * 64)

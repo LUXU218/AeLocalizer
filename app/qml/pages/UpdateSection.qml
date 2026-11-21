@@ -228,7 +228,7 @@ SectionedPage {
                 objectName: "updateRepositoryInput"
                 Layout.fillWidth: true
                 Layout.preferredHeight: 34
-                placeholderText: "GitHub 仓库地址或 owner/repo"
+                placeholderText: "仓库地址或 owner/repo，留空使用官方源"
                 Accessible.name: "GitHub 仓库"
                 selectByMouse: true
                 color: Theme.textPrimary

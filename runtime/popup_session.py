@@ -19,10 +19,10 @@ import time
 
 try:                                    # deployed flat next to guard_uni.py
     from build_profile import (POPUP_FIELD_OFFSET, BuildMismatch, known_version,
-                               popup_field_layout, popup_profile)
+                               media_popup_field_layout, popup_field_layout, popup_profile)
 except ImportError:                     # imported as runtime.popup_session
     from .build_profile import (POPUP_FIELD_OFFSET, BuildMismatch, known_version,
-                                popup_field_layout, popup_profile)
+                                media_popup_field_layout, popup_field_layout, popup_profile)
 
 # AE2025 25.5.0.4 historical value. Real sessions derive the vtable from the
 # installed flt.dll; this fallback only keeps callers that inject a fake
@@ -120,14 +120,26 @@ class PopupSession:
                 adopted = adapted_runtime_profile(self._proc, modules, self.data_root)
                 tdb = next((m for m in modules
                             if m["name"].casefold() == "tdb.dll"), None)
-                if (not adopted or not adopted.popup_layout_verified or not tdb
-                        or module_digest(self._proc, tdb["path"]) != adopted.tdb_sha):
-                    raise BuildMismatch("no matching local popup layout")
-                key = (sha, adopted.tdb_sha)
+                if not adopted:
+                    raise BuildMismatch("no local profile for the loaded FLT and AfterFXLib")
+                if not tdb or module_digest(self._proc, tdb["path"]) != adopted.tdb_sha:
+                    raise BuildMismatch("loaded TDB does not match the local profile")
+                if not adopted.popup_layout_verified:
+                    raise BuildMismatch("local profile has no verified TDB popup layout")
+                media_sha = adopted.popup_media_sha
+                media = next((m for m in modules if m["name"].casefold() == "mediafoundation.dll"), None)
+                if media_sha and (not media
+                                  or os.path.normcase(os.path.dirname(media["path"])) != os.path.normcase(os.path.dirname(flt["path"]))
+                                  or module_digest(self._proc, media["path"]) != media_sha):
+                    raise BuildMismatch("loaded MediaFoundation does not match the local popup profile")
+                key = (sha, adopted.tdb_sha, media_sha)
                 if self._popup_file_key == key:
                     profile = self.profile
                 else:
-                    popup_field_layout(tdb["path"], adopted.tdb_sha)
+                    if media_sha:
+                        media_popup_field_layout(tdb["path"], adopted.tdb_sha, media["path"], media_sha)
+                    else:
+                        popup_field_layout(tdb["path"], adopted.tdb_sha)
                     profile = popup_profile(flt["path"], sha, allow_unknown=True)
                     profile["verified_build"] = True
                     profile["local_version"] = adopted.version

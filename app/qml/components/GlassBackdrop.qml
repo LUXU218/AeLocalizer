@@ -6,7 +6,7 @@ Item {
     id: glass
 
     anchors.fill: parent
-    visible: Theme.glassBlur > 0 && Theme.backdropItem !== null
+    visible: Theme.bgImage !== "" && Theme.glassBlur > 0 && Theme.backdropItem !== null
              && !Theme.bgIsVideo && !Theme.bgIsScene
     property real radius: 0
 

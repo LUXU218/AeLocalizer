@@ -22,10 +22,7 @@ class TestCheckPluginDir(unittest.TestCase):
             self.assertEqual(issues[0].vendor, "Digital Anarchy")
             self.assertEqual(issues[0].level, "block")
 
-    def test_skips_when_license_present(self):
-        # ★ 2026-10-21 语义变更：Digital Anarchy 已进【崩溃黑名单】，
-        #   即使有授权文件也要报警——因为它和汉化后的 BCC 冲突会崩 AE。
-        #   这条改为验证「崩溃黑名单优先于授权检测」。
+    def test_keeps_vendor_warning_when_license_file_is_present(self):
         with tempfile.TemporaryDirectory() as td:
             d = os.path.join(td, "Digital Anarchy")
             os.makedirs(d)
@@ -34,7 +31,7 @@ class TestCheckPluginDir(unittest.TestCase):
             issues = check_plugin_dir(td)
             self.assertEqual(len(issues), 1)
             self.assertEqual(issues[0].level, "block")
-            self.assertIn("崩溃", issues[0].reason)
+            self.assertIn("序列号对话框", issues[0].reason)
 
     def test_marks_disabled(self):
         with tempfile.TemporaryDirectory() as td:

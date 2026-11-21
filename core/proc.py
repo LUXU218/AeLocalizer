@@ -435,33 +435,50 @@ def list_ae_processes() -> list:
     return result
 
 
-def main_window(pid: int) -> int:
-    """AE 主窗口句柄(类名 AE_CApplication_ 前缀)。必须是唯一且可用的,
-    模态对话框开着时拒绝操作。"""
+def _ae_windows(pids) -> list:
     u = C.WinDLL("user32", use_last_error=True)
     u.GetWindowThreadProcessId.argtypes = [W.HWND, C.POINTER(W.DWORD)]
     u.GetClassNameW.argtypes = [W.HWND, W.LPWSTR, C.c_int]
-    u.IsWindowEnabled.argtypes = [W.HWND]
-    u.IsWindowEnabled.restype = W.BOOL
     result = []
     callback = C.WINFUNCTYPE(W.BOOL, W.HWND, W.LPARAM)
 
     @callback
     def visit(hwnd, arg):
         owner = W.DWORD()
-        name = C.create_unicode_buffer(256)
         u.GetWindowThreadProcessId(hwnd, C.byref(owner))
-        u.GetClassNameW(hwnd, name, len(name))
-        if owner.value == pid and name.value.startswith("AE_CApplication_"):
-            result.append(hwnd)
+        if owner.value in pids:
+            name = C.create_unicode_buffer(256)
+            u.GetClassNameW(hwnd, name, len(name))
+            if name.value.startswith("AE_CApplication_"):
+                result.append((owner.value, hwnd))
         return True
 
     u.EnumWindows(visit, 0)
+    return result
+
+
+def list_ae_hosts() -> list:
+    """Prefer AE editing windows over headless AfterFX processes."""
+    processes = list_ae_processes()
+    if len(processes) <= 1:
+        return processes
+    owners = {pid for pid, _ in _ae_windows({p["pid"] for p in processes})}
+    return [p for p in processes if p["pid"] in owners] if owners else processes
+
+
+def main_window(pid: int) -> int:
+    """AE 主窗口句柄(类名 AE_CApplication_ 前缀)。必须是唯一且可用的,
+    模态对话框开着时拒绝操作。"""
+    result = _ae_windows({pid})
     if len(result) != 1:
         raise RuntimeError("未找到唯一的 AE 主窗口")
-    if not u.IsWindowEnabled(result[0]):
+    hwnd = result[0][1]
+    u = C.WinDLL("user32", use_last_error=True)
+    u.IsWindowEnabled.argtypes = [W.HWND]
+    u.IsWindowEnabled.restype = W.BOOL
+    if not u.IsWindowEnabled(hwnd):
         raise RuntimeError("请先关闭 AE 中的对话框,再执行名称操作")
-    return result[0]
+    return hwnd
 
 
 def write_json_atomic(path, value, *, ensure_ascii: bool = False, indent=2):

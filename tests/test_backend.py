@@ -757,7 +757,7 @@ class TestLiveWatch(unittest.TestCase):
             ({"language_ready": True, "mode": "on", "error": "",
               "popup_error": "FLT build not verified: sha256 mismatch",
               "draw_stats": {"text_enabled": False, "replaced": 7}},
-             "下拉通道不可用", "已还原原文"),
+             "参数名已显示中文；下拉通道不可用", "参数/下拉已显示中文"),
             ({"language_ready": True, "mode": "on", "error": "",
               "popup_error": "RuntimeError: refresh scan failed after writes",
               "draw_stats": {"text_enabled": False, "replaced": 7}},

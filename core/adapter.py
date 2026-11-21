@@ -53,6 +53,7 @@ class Profile:
     enabled: bool = False       # 只有通过校验的条目才允许写入
     parameter_draw_sha: str = ""  # 本机结构探测使用的 AfterFXLib.dll
     popup_layout_verified: bool = False
+    popup_media_sha: str = ""
 
 
 def match_encoding(profile: Profile) -> str:
@@ -199,9 +200,12 @@ def load_local(data_root) -> dict:
             profile = profiles.get(key)
             if (profile and isinstance(item, dict) and item.get("fltSha") == profile.flt_sha
                     and isinstance(item.get("drawSha"), str)):
-                profiles[key] = replace(
-                    profile, parameter_draw_sha=item["drawSha"],
-                    popup_layout_verified=item.get("popupVerified") is True)
+                media_sha = item.get("popupMediaSha", "")
+                if isinstance(media_sha, str):
+                    profiles[key] = replace(
+                        profile, parameter_draw_sha=item["drawSha"],
+                        popup_layout_verified=item.get("popupVerified") is True,
+                        popup_media_sha=media_sha)
     return profiles
 
 
@@ -221,10 +225,13 @@ def save_local(data_root, profiles: dict, *, merge: bool = True) -> None:
             row = _profile_to_json(profile)
             draw_sha = row.pop("parameter_draw_sha")
             popup = row.pop("popup_layout_verified")
+            media_sha = row.pop("popup_media_sha")
             rows[key] = row
             if draw_sha:
                 evidence[key] = {"fltSha": profile.flt_sha, "drawSha": draw_sha,
                                  "popupVerified": popup}
+                if media_sha:
+                    evidence[key]["popupMediaSha"] = media_sha
         # Older releases can still read the profile rows after a rollback.
         payload = {"schemaVersion": SCHEMA_VERSION, "kind": "aeloc-adapter-profiles",
                    "profiles": rows, "languageEvidence": evidence}
