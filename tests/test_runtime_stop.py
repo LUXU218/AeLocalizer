@@ -33,6 +33,9 @@ class RuntimeStopTest(unittest.TestCase):
                 self.popup = None
                 self.mapping = {}
 
+            def popup_activity(self, mode):
+                return None
+
             def close(self):
                 entered.set()
                 calls.append(safe.is_set())

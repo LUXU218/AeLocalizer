@@ -17,6 +17,7 @@ from .liveparams import iter_heap_regions
 #: 只发现结构头；不是猜测地址，且必须命中 ADBE Effect Parade GUID。
 _POOL_CACHE = {}
 _PARADE_CACHE = {}
+_POPUP_NAMES = {}
 
 
 def _module(p, name):
@@ -167,10 +168,14 @@ def _valid_parade(p, cat, address) -> bool:
     return False
 
 
+def _parade_key(p, cat):
+    return (int(p.pid), int(getattr(p, "creation_time", 0) or 0),
+            int(cat.profile.match_pool or 0))
+
+
 def discover_parades(p, cat, deadline=None, cancel=None, *, rescan_interval=5.0):
     """真实 parade GUID 的增量搜索：小块优先、cursor 续扫、保留多 parade。"""
-    key = (int(p.pid), int(getattr(p, "creation_time", 0) or 0),
-           int(cat.profile.match_pool or 0))
+    key = _parade_key(p, cat)
     needles = [k for k, v in cat.names.items() if v == "ADBE Effect Parade"]
     if not needles:
         raise RuntimeError("match-pool 中没有 ADBE Effect Parade")
@@ -181,6 +186,8 @@ def discover_parades(p, cat, deadline=None, cancel=None, *, rescan_interval=5.0)
                  "idx": 0, "off": 0, "parades": set(), "done": False,
                  "next_rescan": 0.0}
         _PARADE_CACHE[key] = state
+    elif state["regions"] is None:
+        state["regions"] = sorted(iter_heap_regions(p), key=lambda r: r[1])
     elif state.get("done") and now >= float(state.get("next_rescan") or 0.0):
         # done 后定期刷新私有区快照；保留旧 parades，从新 regions 起点
         # 做有界增量扫描，避免新图层/新 parade 永远看不到。
@@ -241,23 +248,58 @@ def discover_parades(p, cat, deadline=None, cancel=None, *, rescan_interval=5.0)
 
 def parade_scan_pending(p, cat) -> bool:
     """本次 parade 搜索是否还有未扫区域（调用方应续步）。"""
-    key = (int(p.pid), int(getattr(p, "creation_time", 0) or 0),
-           int(cat.profile.match_pool or 0))
-    st = _PARADE_CACHE.get(key)
+    st = _PARADE_CACHE.get(_parade_key(p, cat))
     return bool(st is not None and not st.get("done"))
+
+
+def _visible_parades(p, cat, streams):
+    parades = set()
+    roots = set()
+    for stream in streams:
+        try:
+            root = p.u64(stream + 32)
+            parade = p.u64(root + 32)
+            if (cat.names.get(p.read(parade + 8, 16)) == "ADBE Effect Parade"
+                    and p.u64(root) == cat.flt + cat.profile.root_vtable
+                    and _valid_parade(p, cat, parade)):
+                parades.add(parade)
+                roots.add(root)
+        except (OSError, RuntimeError, ValueError):
+            continue
+    return parades, roots
 
 
 def parameter_rows(p, data_root, deadline=None, cancel=None,
                    with_state: bool = False, *, rescan_interval: float = 5.0,
-                   parade_scan_budget=None):
+                   parade_scan_budget=None, prefer_current=False, visible_streams=(),
+                   popup_ownership=False):
     """返回当前参数；单独指定的 parade 预算从目录准备完成后开始计时。"""
     reg = Registry(p, data_root)
     profile = profile_with_pool(p, reg.profile, deadline=deadline)
-    cat = ParameterCatalog(p, data_root=data_root, profile=profile)
-    scan_deadline = deadline if parade_scan_budget is None else time.monotonic() + parade_scan_budget
-    parades = discover_parades(p, cat, deadline=scan_deadline, cancel=cancel,
-                              rescan_interval=rescan_interval)
-    pending = parade_scan_pending(p, cat)
+    names_key = None
+    if popup_ownership:
+        names_key = (int(p.pid), int(getattr(p, "creation_time", 0) or 0),
+                     profile.flt_sha, profile.tdb_sha, profile.match_pool)
+    previous_names = _POPUP_NAMES.get(names_key) if visible_streams else None
+    catalog_options = {"known_names": previous_names} if previous_names is not None else {}
+    cat = ParameterCatalog(p, data_root=data_root, profile=profile, **catalog_options)
+    parades = set()
+    visible, roots = _visible_parades(p, cat, visible_streams)
+    if visible:
+        cached = _PARADE_CACHE.setdefault(_parade_key(p, cat), {
+            "regions": None, "idx": 0, "off": 0, "parades": set(), "done": False, "next_rescan": 0.0})
+        cached["parades"].update(visible)
+    if prefer_current or visible:
+        cached = _PARADE_CACHE.get(_parade_key(p, cat), {})
+        parades = {addr for addr in cached.get("parades", ()) if _valid_parade(p, cat, addr)}
+    if parades:
+        # The caller can apply current owners before the next discovery tick.
+        pending = True
+    else:
+        scan_deadline = deadline if parade_scan_budget is None else time.monotonic() + parade_scan_budget
+        parades = discover_parades(p, cat, deadline=scan_deadline, cancel=cancel,
+                                  rescan_interval=rescan_interval)
+        pending = parade_scan_pending(p, cat)
     if not parades:
         if pending:
             return (profile, [], set(parades), True) if with_state else (
@@ -267,14 +309,25 @@ def parameter_rows(p, data_root, deadline=None, cancel=None,
         return (profile, [], set(), False) if with_state else (profile, [], set())
     cat.scan_parades = lambda progress=None: set(parades)
     # 不再缓存 rows 快照：删除/新加参数、切项目必须当下向量可见。
-    rows = cat.rows()
+    rows = cat.rows(popup_ownership=True) if popup_ownership else cat.rows()
+    if roots:
+        rows.sort(key=lambda row: row["parent"] not in roots)
+        if previous_names is not None and any(row["parent"] in roots and
+                not (row["matchName"] and row["effectMatchName"]) for row in rows):
+            cat.names = cat.match_pool()
+            rows = cat.rows(popup_ownership=True)
+            rows.sort(key=lambda row: row["parent"] not in roots)
+    if names_key is not None:
+        if names_key not in _POPUP_NAMES and len(_POPUP_NAMES) >= 4:
+            del _POPUP_NAMES[next(iter(_POPUP_NAMES))]
+        _POPUP_NAMES[names_key] = cat.names
     if with_state:
         return profile, rows, parades, pending
     return profile, rows, parades
 
 
 def clear_cache(pid=None):
-    for cache in (_POOL_CACHE, _PARADE_CACHE):
+    for cache in (_POOL_CACHE, _PARADE_CACHE, _POPUP_NAMES):
         if pid is None:
             cache.clear()
         else:

@@ -41,4 +41,19 @@ class PopupCodecTests(unittest.TestCase):
         self.assertEqual(got['reasons'], {'capacity-unverified': 1})
         self.assertEqual(LanguageEngine._critical_popup_reasons(got['reasons']), {})
 
+    def test_hot_dictionary_replaces_and_clears_only_our_own_classic_labels(self):
+        raw = b'Screen|Reflect'
+        session = self.scan('utf8', raw)
+        writes = [raw + b'\0']
+        process = SimpleNamespace(read=lambda addr, size: writes[-1],
+                                  write_exact=lambda addr, payload: writes.append(payload))
+        session._open = lambda: (process, _flt())
+        session._valid = lambda rec: True
+
+        self.assertEqual(session.apply('on', {'Screen': '滤色'})['changed'], 1)
+        self.assertEqual(session.apply('on', {'Screen': '屏幕'})['changed'], 1)
+        self.assertEqual(session.apply('on', {})['changed'], 1)
+        self.assertEqual(writes, [raw + b'\0', '滤色|Reflect'.encode() + b'\0',
+                                  '屏幕|Reflect'.encode() + b'\0', raw + b'\0'])
+
 if __name__=='__main__':unittest.main(verbosity=2)

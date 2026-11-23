@@ -249,8 +249,8 @@ def validate_production_host(h):
         return None
 
 
-def _redraw_host(pid):
-    """Async, input-free Win32 invalidation for current AE window (3 bounded)."""
+def _redraw_host(pid, *, attempts=3):
+    """Async, input-free Win32 invalidation for the current AE window."""
     try:
         import ctypes
         from ctypes import wintypes as W
@@ -267,11 +267,12 @@ def _redraw_host(pid):
         u.RedrawWindow.restype = W.BOOL
         u.InvalidateRect.argtypes = [W.HWND, ctypes.c_void_p, W.BOOL]
         u.InvalidateRect.restype = W.BOOL
-        for _ in range(3):
+        for _ in range(attempts):
             u.RedrawWindow(W.HWND(hwnd), None, None,
                            0x1 | 0x4 | 0x80 | 0x400)
             u.InvalidateRect(W.HWND(hwnd), None, False)
-            time.sleep(0.12)
+            if attempts > 1:
+                time.sleep(0.12)
         return True
     except Exception:
         return False
@@ -544,10 +545,17 @@ class LanguageEngine:
                                          self.project_root,
                                          identity=ident,
                                          plugin_hashes=plugins)
-                new_popup.display_only = bool(new_draw.popup_paint_profile)
+                paint_profile = new_draw.popup_paint_profile
+                new_popup.display_only = bool(paint_profile) and not paint_profile.get("supplemental")
             except Exception as _pe:
                 new_popup = None
                 self.popup_error = str(_pe)[:160]
+            if new_popup is not None and not new_popup.display_only:
+                try:
+                    if not new_draw.watch_popup_activity(new_popup.activity_profile()):
+                        _log("popup activity unavailable; using background discovery")
+                except Exception as exc:
+                    _log("popup activity unavailable: %s" % str(exc)[:150])
             self.draw = new_draw
             self.popup = new_popup
             self.host = dict(host)
@@ -650,31 +658,52 @@ class LanguageEngine:
         except Exception:
             return False
 
-    def apply(self, mode, host, gen):
+    def _scan_popup(self, mode, *, prefer_current=False):
+        options = {"prefer_current": True} if prefer_current else {}
+        if getattr(self.draw, "popup_activity", None) is not None:
+            streams = self.draw.take_visible_streams()
+            if streams and mode == "on":
+                options["visible_streams"] = streams
+        self.popup.scan(**options)
+
+    def popup_activity(self, mode):
+        if mode == "on" and self.popup is not None:
+            return getattr(self.draw, "popup_activity", None)
+        return None
+
+    def apply(self, mode, host, gen, *, prefer_current=True):
         """Return (language_ready, error). Caller updates status only from here."""
         try:
             self.attach(host)
             if not self._refresh_mapping():
                 return False, "dictionary-unavailable:%s" % self.map_error
+            pid = int(host["pid"])
+            display_only = bool(getattr(self.popup, "display_only", False))
+            redraw_before_scan = self.popup is None or display_only
             if mode == "on":
                 if not self.draw.mode(True, int(gen)):
                     self.draw_error = "draw-mode-rejected"
                     return False, "draw-mode"
-                _redraw_host(int(host["pid"]))
+                if redraw_before_scan:
+                    _redraw_host(pid, attempts=1)
                 if self.popup is None:
                     # Params verified; popup channel explicitly unavailable.
                     self.popup_reasons = {}
                     self.popup_unsupported = 0
                     return True, ""
                 try:
-                    self.popup.scan()
-                    if getattr(self.popup, "display_only", False):
+                    self._scan_popup(mode, prefer_current=prefer_current)
+                    if display_only:
                         if not self.draw.set_popup_records(self.popup.records, self.popup.encoding):
                             return False, "popup-menu-records"
                     res = self.popup.apply("on", self.mapping)
                 except _POPUP_EXPECTED as _pe:
                     self._drop_popup(_pe)
+                    if not redraw_before_scan:
+                        _redraw_host(pid, attempts=1)
                     return True, ""
+                if not redraw_before_scan:
+                    _redraw_host(pid, attempts=1)
                 self.popup_reasons = dict(res.get("reasons") or {})
                 self.popup_unsupported = int(res.get("skipped") or 0)
                 complete, preason = self._popup_progress()
@@ -688,16 +717,17 @@ class LanguageEngine:
                 return True, ""
             if mode == "off":
                 self.draw.mode(False, int(gen))
+                if redraw_before_scan:
+                    _redraw_host(pid, attempts=1)
                 if not self.draw.drain(2.0):
                     return False, "draw-active"
-                _redraw_host(int(host["pid"]))
                 if self.popup is None:
                     self.popup_reasons = {}
                     self.popup_unsupported = 0
                     return True, ""
                 try:
-                    self.popup.scan()
-                    if getattr(self.popup, "display_only", False):
+                    self._scan_popup(mode, prefer_current=prefer_current)
+                    if display_only:
                         if not self.draw.set_popup_records(self.popup.records, self.popup.encoding):
                             return False, "popup-menu-records"
                     res = self.popup.apply("off", self.mapping)
@@ -710,7 +740,11 @@ class LanguageEngine:
                     restored = self._restore_popup_best_effort()
                     self.popup_restore_unknown = not restored
                     self._drop_popup(_pe)
+                    if not redraw_before_scan:
+                        _redraw_host(pid, attempts=1)
                     return True, ""
+                if not redraw_before_scan:
+                    _redraw_host(pid, attempts=1)
                 self.popup_reasons = dict(res.get("reasons") or {})
                 self.popup_unsupported = int(res.get("skipped") or 0)
                 complete, preason = self._popup_progress()
@@ -738,6 +772,9 @@ class LanguageEngine:
             if not self._refresh_mapping():
                 return False, "dictionary-unavailable:%s" % self.map_error
             map_changed = self.mapping != old_map
+            display_only = bool(getattr(self.popup, "display_only", False))
+            if map_changed and (display_only or self.popup is None) and self.host:
+                _redraw_host(int(self.host["pid"]), attempts=1)
             if self.popup is None:
                 if self.popup_error:
                     # Params-only session: popup channel already reported as
@@ -745,8 +782,8 @@ class LanguageEngine:
                     return True, ""
                 return False, "no-popup-session"
             try:
-                self.popup.scan()
-                if getattr(self.popup, "display_only", False):
+                self._scan_popup(mode)
+                if display_only:
                     if not self.draw.set_popup_records(self.popup.records, self.popup.encoding):
                         return False, "popup-menu-records"
                 res = self.popup.apply(mode, self.mapping)
@@ -760,8 +797,8 @@ class LanguageEngine:
             # discovery is still running; otherwise their labels wait for the
             # slowest discovery slice. Background discovery is only a diagnostic
             # and does not make the already-applied translation unready.
-            if (res.get("changed") or map_changed) and self.host:
-                _redraw_host(int(self.host["pid"]))
+            if (res.get("changed") or (map_changed and not display_only)) and self.host:
+                _redraw_host(int(self.host["pid"]), attempts=1)
             self.popup_reasons = dict(res.get("reasons") or {})
             self.popup_unsupported = int(res.get("skipped") or 0)
             complete, preason = self._popup_progress()
@@ -1301,17 +1338,20 @@ def main(argv):
                 last_write = time.monotonic()
             else:
                 nowm = time.monotonic()
+                popup_activity = lang.popup_activity(state.mode)
                 if ((state.mode == "on"
                      or (state.mode in ("on", "off") and not state.language_ready)
                      or (state.mode == "off"
                          and state.background_discovery_pending))
-                        and state.host and nowm - last_lang_tick >=
-                        _language_poll_interval(state.mode, lang.popup)):
+                        and state.host and ((popup_activity is not None and popup_activity.is_set())
+                                            or nowm - last_lang_tick >=
+                                            _language_poll_interval(state.mode, lang.popup))):
                     if state.language_ready:
                         ok, lerr = lang.refresh(state.mode)
                     else:
                         ok, lerr = lang.apply(state.mode, state.host,
-                                              state.last_gen)
+                                              state.last_gen,
+                                              prefer_current=False)
                     last_lang_tick = time.monotonic()
                     _sync_language_diag(state, lang)
                     state.language_ready = bool(ok)
@@ -1378,7 +1418,11 @@ def main(argv):
                         _write_capture(OUT, obs)
                         last_capture_rev = int(obs.get("rev") or rev)
                     last_capture = capm
-            time.sleep(0.15)
+            popup_activity = lang.popup_activity(state.mode)
+            if popup_activity is None:
+                time.sleep(0.15)
+            else:
+                popup_activity.wait(0.15)
     finally:
         # Any unexpected exception/exit path must still drain native work while
         # the host is alive. close=False is never treated as permission to exit.

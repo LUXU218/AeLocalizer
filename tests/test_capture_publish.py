@@ -130,6 +130,9 @@ class LoopPublishTest(unittest.TestCase):
                 def observe(self):
                     return obs
 
+                def popup_activity(self, mode):
+                    return None
+
                 def refresh(self, mode):
                     return True, ""
 

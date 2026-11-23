@@ -316,6 +316,56 @@ class ParadeRescanScheduleTest(unittest.TestCase):
 
 
 class RowsRefreshTest(unittest.TestCase):
+    def test_new_visible_stream_bypasses_heap_discovery_and_revalidates_owners(self):
+        import dataclasses
+
+        @dataclasses.dataclass
+        class Profile:
+            match_pool: int = 1
+            root_vtable: int = 0x10
+
+        profile = Profile()
+        p = _Proc()
+        p.u64 = {0x120: 0x200, 0x220: 0x300, 0x420: 0x500, 0x520: 0x600, 0x200: 0x110}.__getitem__
+        p.read = lambda address, size: b"known" if address == 0x308 else b"other"
+        cached_row = {"parent": 0x240}
+        new_row = {"parent": 0x200}
+        catalog = types.SimpleNamespace(profile=profile, flt=0x100, names={b"known": "ADBE Effect Parade"})
+        catalog.rows = lambda: [cached_row, new_row]
+        cache = {(p.pid, p.creation_time, 1): {"parades": {0x390}, "done": True}}
+        with mock.patch.object(pd, "_PARADE_CACHE", cache), \
+             mock.patch.object(pd, "Registry", return_value=types.SimpleNamespace(profile=profile)), \
+             mock.patch.object(pd, "ParameterCatalog", return_value=catalog), \
+             mock.patch.object(pd, "_valid_parade", side_effect=lambda p, cat, addr: addr != 0x600), \
+             mock.patch.object(pd, "discover_parades") as scan:
+            _, rows, parades, pending = pd.parameter_rows(
+                p, None, with_state=True, visible_streams=(0x100, 0x400))
+        self.assertEqual((rows, parades, pending), ([new_row, cached_row], {0x300, 0x390}, True))
+        scan.assert_not_called()
+
+    def test_current_pass_revalidates_cached_parades_without_running_heap_discovery(self):
+        import dataclasses
+
+        @dataclasses.dataclass
+        class Profile:
+            match_pool: int = 1
+
+        p = _Proc()
+        profile = Profile()
+        current_rows = [{"name": "current"}]
+        catalog = types.SimpleNamespace(profile=profile)
+        catalog.rows = lambda: current_rows if catalog.scan_parades() == {2} else []
+        cache = {(p.pid, p.creation_time, 1): {"parades": {1, 2}}}
+        with mock.patch.object(pd, "_PARADE_CACHE", cache), \
+             mock.patch.object(pd, "Registry", return_value=types.SimpleNamespace(profile=profile)), \
+             mock.patch.object(pd, "ParameterCatalog", return_value=catalog), \
+             mock.patch.object(pd, "_valid_parade", side_effect=lambda p, cat, addr: addr == 2), \
+             mock.patch.object(pd, "discover_parades") as scan:
+            _, rows, parades, pending = pd.parameter_rows(
+                p, None, with_state=True, prefer_current=True)
+        self.assertEqual((rows, parades, pending), (current_rows, {2}, True))
+        scan.assert_not_called()
+
     def test_parade_slice_starts_after_catalog_construction(self):
         import dataclasses
 

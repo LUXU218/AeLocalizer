@@ -164,7 +164,7 @@ def rows_from_effect_roots(p, roots, profile, limit: int = 5000,
 
 
 class ParameterCatalog:
-    def __init__(self, p, data_root=None, profile=None):
+    def __init__(self, p, data_root=None, profile=None, *, known_names=None):
         from pathlib import Path as _Path
 
         from .livenames import Registry
@@ -190,7 +190,7 @@ class ParameterCatalog:
         ):
             if not expected or p.read(self.tdb + rva, len(expected)) != expected:
                 raise RuntimeError("参数结构接口不匹配,未执行读取")
-        self.names = self.match_pool()
+        self.names = known_names if known_names is not None else self.match_pool()
         self.display_cache_fallbacks = 0
 
     # ---- TDB 内部标识池 ----
@@ -431,19 +431,25 @@ class ParameterCatalog:
                     break   # 该流的枚举串已找到(多偏移是同一串的候选位)
         return out
 
-    def rows(self, progress=None) -> list:
+    def rows(self, progress=None, *, popup_ownership=False) -> list:
         """全部参数行:{effectMatchName, matchName, name, pfName, address, guid, parent}。"""
         result = []
         p = self.p
         encoding = self.profile.encoding
         for root in self.roots(progress):
             effect = self.names.get(p.read(root + 8, 16))
-            if not effect:
+            if not effect and not popup_ownership:
                 continue
             for address, guid in self.children(root):
                 if p.read(address + 8, 16) != guid or p.u64(address + 32) != root:
                     raise RuntimeError("参数归属校验失败,已停止")
                 param = self.names.get(guid)
+                if popup_ownership:
+                    # The alias pass needs all linked owners, even when a new
+                    # identifier has not entered the cached name table yet.
+                    result.append({"effectMatchName": effect or "", "matchName": param or "",
+                                   "address": address, "guid": guid.hex(), "parent": root})
+                    continue
                 label = p.read(address + 0x40, 32)
                 if not param or b"\0" not in label:
                     continue

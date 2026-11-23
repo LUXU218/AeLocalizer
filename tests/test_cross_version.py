@@ -149,7 +149,7 @@ class _Popup:
         self.stats = {}
         self.closed = False
 
-    def scan(self):
+    def scan(self, *, prefer_current=False):
         if self.scan_exc:
             raise self.scan_exc
 

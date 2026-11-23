@@ -38,10 +38,12 @@ import time
 
 try:                                    # deployed flat next to guard_uni.py
     from build_profile import (TEXT_LABEL_VERSIONS, BuildMismatch,
-                               draw_candidate, text_draw_profile, popup_draw_profile, popup_menu_profile)
+                               draw_candidate, text_draw_profile, popup_draw_profile, popup_menu_profile,
+                               popup_label_profile)
 except ImportError:                     # imported as runtime.param_draw_hook
     from .build_profile import (TEXT_LABEL_VERSIONS, BuildMismatch,
-                                draw_candidate, text_draw_profile, popup_draw_profile, popup_menu_profile)
+                                draw_candidate, text_draw_profile, popup_draw_profile, popup_menu_profile,
+                                popup_label_profile)
 
 JS = r"""
 var MAP = __MAP__;
@@ -90,8 +92,10 @@ var PRE_ON = false, POST_ON = false;
 // derived paint sink + std::wstring offset, or null on classic builds.
 var TEXT = __TEXT__;
 var POPUP = typeof __POPUP__ === 'undefined' ? null : __POPUP__;
+var LAYER_POPUP = typeof __LAYER_POPUP__ === 'undefined' ? null : __LAYER_POPUP__;
 var TEXT_SCOPE = {}, SOURCE_ACTIVE = 0, SOURCE_ON = false;
 var POPUP_ON = false, P_HITS = 0, P_REPLACED = 0, P_ERR = 0, P_SKIP_CAP = 0, P_EMPTY = 0;
+var POPUP_SOURCES = {};
 var PAINT_ACTIVE = 0;
 var TDRAW_ON = false, T_HITS = 0, T_REPLACED = 0, T_SKIP_CAP = 0;
 var T_SKIP_INVALID = 0, T_ERR = 0, T_LAST = "";
@@ -276,7 +280,7 @@ function sourceLeave(retval) {
     else TEXT_SCOPE[this.threadId] = this.aelocSourcePrevious;
     if (this.aelocSourceCounted) SOURCE_ACTIVE--;
 }
-function paintEnter(args, layout, kind) {
+function paintEnter(args, layout, kind, popupOwner) {
     if (!WANT || !layout) return;
     if (kind === 'text' && TEXT_SCOPE[this.threadId] !== true) return;
     if (this.aeloc) {
@@ -295,9 +299,10 @@ function paintEnter(args, layout, kind) {
         if (kind === 'popup') P_HITS++; else T_HITS++;
         var data = (cap <= layout.inline_capacity) ? str : str.readPointer();
         var text = data.readUtf16String(len), key = text.trim();
+        var tr = MAP[key];
+        if (popupOwner && (!tr || !tr.length || !effectPopupPath(menuPath(popupOwner)))) return;
         noteSeen(key);
         if (kind === 'popup') noteEnum(key);
-        var tr = MAP[key];
         if (!tr || !tr.length) return;
         var out = text.match(/^\s*/)[0] + tr + text.match(/\s*$/)[0];
         if (out.length > cap) {
@@ -321,7 +326,32 @@ function paintEnter(args, layout, kind) {
     }
 }
 function textEnter(args) { paintEnter.call(this, args, TEXT, 'text'); }
-function popupEnter(args) { paintEnter.call(this, args, POPUP, 'popup'); }
+function popupSourceEnter(args, caller) {
+    var tid = this.threadId;
+    this.popupSourcePrevious = POPUP_SOURCES[tid];
+    POPUP_SOURCES[tid] = null;
+    SOURCE_ACTIVE++;
+    if (!WANT) return;
+    try {
+        var owner = menuOwner(args[0]);
+        if (owner) POPUP_SOURCES[tid] = {caller: caller, owner: owner};
+    } catch (e) { P_ERR++; T_LAST = 'popup-source:' + String(e); }
+}
+function popupSourceLeave() {
+    var tid = this.threadId;
+    if (typeof this.popupSourcePrevious === 'undefined') delete POPUP_SOURCES[tid];
+    else POPUP_SOURCES[tid] = this.popupSourcePrevious;
+    SOURCE_ACTIVE--;
+}
+function popupEnter(args) {
+    if (POPUP && POPUP.paint_sources) {
+        var source = POPUP_SOURCES[this.threadId];
+        if (!WANT || !source || !this.returnAddress.equals(source.caller)) return;
+        paintEnter.call(this, args, POPUP, 'popup', source.owner);
+        return;
+    }
+    paintEnter.call(this, args, POPUP, 'popup');
+}
 function textLeave(retval) {
     var r = this.aeloc;
     this.aeloc = null;
@@ -384,29 +414,39 @@ function menuOwner(widget){
     }
     return null;
 }
+function readPopupPath(path, reader) {
+    var count = reader.length(path), names = [];
+    if (count > 64) throw Error('menu path length');
+    for (var i = 0; i < count; i++) names.push(reader.name(reader.match(reader.component(path, i))).readUtf8String());
+    return names;
+}
 function menuPath(owner){
-    var out=Memory.alloc(32),made=false,names=[];
+    var out=Memory.alloc(32),made=false;
     try{
         menuFns.path(owner,out);made=true;
-        var n=menuFns.length(out);if(n>64)throw Error('menu path length');
-        for(var i=0;i<n;i++)names.push(menuFns.name(menuFns.match(menuFns.component(out,i))).readUtf8String());
-        return names;
+        return readPopupPath(out, menuFns);
     }finally{if(made)menuFns.dtor(out);}
+}
+function effectPopupPath(names){
+    var parade=names.lastIndexOf('ADBE Effect Parade');
+    return parade>=0 && parade<=names.length-3 && !!names[parade+1] && !!names[names.length-1];
 }
 function menuContext(widget){
     var owner=menuOwner(widget);if(!owner)return null;
     var names=menuPath(owner);if(names.length<2)return null;
     var key=names[names.length-2]+'\x1f'+names[names.length-1];
-    var candidates=MENU_KEYS[key];if(!candidates)return null;
+    var candidates=MENU_KEYS[key];
+    // A fresh control can be qualified directly by its live effect stream.
+    // Retain exact matching wherever the typed scan already knows the tuple.
+    if(!candidates && !effectPopupPath(names))return null;
     var items=menuFns.items(widget),begin=items.readPointer(),end=items.add(8).readPointer();
     var stride=POPUP.menu.descriptor_stride;
     if(end.compare(begin)<0 || end.sub(begin).compare(ptr(stride*1024))>0)return null;
     var bytes=end.sub(begin).toInt32();
-    if(bytes<0 || bytes%stride || bytes/stride>1024)return null;
+    if(bytes<=0 || bytes%stride || bytes/stride>1024)return null;
     var labels=[];for(var i=0;i<bytes/stride;i++)labels.push(menuWS(begin.add(i*stride)));
     var tuple=labels.join('|');
-    if(candidates.indexOf(tuple)<0)return null;
-    var allowed={};labels.forEach(function(s){allowed[s]=true;});
+    if(candidates && candidates.indexOf(tuple)<0)return null;
     return {labels:labels, key:key, widget:widget, begin:begin, end:end};
 }
 function menuBuildEnter(args){
@@ -434,6 +474,7 @@ function menuUtf8String(s){
     out.add(16).writeU64(bytes);return {obj:out,data:data};
 }
 function menuAppendEnter(args){
+    if(!WANT)return;
     var stack=MENU_SCOPE[String(this.threadId)];
     if(!stack || !stack.length || !stack[stack.length-1] || !this.returnAddress.equals(menuReturn))return;
     try{
@@ -466,6 +507,7 @@ function osMenuOriginal(context,arg){
     return label===current.labels[delta/stride]?label:null;
 }
 function menuOsAppendEnter(args){
+    if(!WANT)return;
     var stack=MENU_SCOPE[String(this.threadId)];
     if(!stack || !stack.length || !stack[stack.length-1] || !this.returnAddress.equals(osMenuReturn))return;
     try{
@@ -494,6 +536,7 @@ function menuFlyoutItemLeave(){
     MENU_ACTIVE--;this.flyoutScope=undefined;
 }
 function menuFlyoutCtorEnter(args){
+    if(!WANT)return;
     var frames=FLYOUT_SCOPE[String(this.threadId)],frame=frames&&frames[frames.length-1];
     if(!frame || !this.returnAddress.equals(flyoutCtorReturn) || args[1].toUInt32()!==frame.index)return;
     try{
@@ -506,12 +549,13 @@ function menuFlyoutCtorEnter(args){
         this.menuLabel=menuUtf8String(translated);args[2]=this.menuLabel.obj;MENU_HITS++;noteApplied(label.trim());
     }catch(e){MENU_ERR++;MENU_LAST=String(e);}
 }
-function setupPopupMenu(){
+function setupPopupMenu(listen){
     if(!POPUP || !POPUP.menu)return;
     var p=POPUP.menu,addresses={};
     Object.keys(p.symbols).forEach(function(key){
         var s=p.symbols[key],mod=Process.getModuleByName(s.module==='afterfxlib'?'AfterFXLib.dll':s.module+'.dll');
         addresses[key]=mod.getExportByName(s.name);
+        if(s.bytes && hexAt(addresses[key],s.bytes.length/2)!==s.bytes)throw Error('popup menu entry changed: '+key);
     });
     menuFns.parent=new NativeFunction(addresses.parent,'pointer',['pointer']);
     menuFns.items=new NativeFunction(addresses.items,'pointer',['pointer']);
@@ -521,19 +565,171 @@ function setupPopupMenu(){
     menuFns.component=new NativeFunction(addresses.component,'pointer',['pointer','uint']);
     menuFns.match=new NativeFunction(addresses.match,'pointer',['pointer']);
     menuFns.name=new NativeFunction(addresses.name,'pointer',['pointer']);
-    if(hexAt(addresses.builder,p.builder_bytes.length/2)!==p.builder_bytes)throw Error('menu builder changed');
-    menuReturn=addresses.builder.add(p.label_return_offset);
     osMenuReturn=addresses.osbuilder.add(p.os_label_return_offset);
     flyoutItemReturn=addresses.custom.add(p.flyout_item_return_offset);
     flyoutCtorReturn=addresses.flyoutitem.add(p.flyout_ctor_return_offset);
     if(hexAt(addresses.osbuilder,p.os_builder_bytes.length/2)!==p.os_builder_bytes)throw Error('OS menu builder changed');
-    Interceptor.attach(addresses.builder,{onEnter:menuBuildEnter,onLeave:menuBuildLeave});
-    Interceptor.attach(addresses.osbuilder,{onEnter:menuBuildEnter,onLeave:menuBuildLeave});
-    Interceptor.attach(addresses.append,{onEnter:menuAppendEnter,onLeave:menuAppendLeave});
-    Interceptor.attach(addresses.osappend,{onEnter:menuOsAppendEnter,onLeave:menuAppendLeave});
-    Interceptor.attach(addresses.flyoutitem,{onEnter:menuFlyoutItemEnter,onLeave:menuFlyoutItemLeave});
-    Interceptor.attach(addresses.flyoutctor,{onEnter:menuFlyoutCtorEnter,onLeave:menuAppendLeave});
+    if(addresses.builder){
+        if(hexAt(addresses.builder,p.builder_bytes.length/2)!==p.builder_bytes)throw Error('menu builder changed');
+        menuReturn=addresses.builder.add(p.label_return_offset);
+        listen(addresses.builder,{onEnter:menuBuildEnter,onLeave:menuBuildLeave});
+        listen(addresses.append,{onEnter:menuAppendEnter,onLeave:menuAppendLeave});
+    }
+    listen(addresses.osbuilder,{onEnter:menuBuildEnter,onLeave:menuBuildLeave});
+    if(POPUP.supplemental)listen(addresses.custom,{onEnter:menuBuildEnter,onLeave:menuBuildLeave});
+    listen(addresses.osappend,{onEnter:menuOsAppendEnter,onLeave:menuAppendLeave});
+    listen(addresses.flyoutitem,{onEnter:menuFlyoutItemEnter,onLeave:menuFlyoutItemLeave});
+    listen(addresses.flyoutctor,{onEnter:menuFlyoutCtorEnter,onLeave:menuAppendLeave});
     MENU_ON=true;
+}
+
+function setupPopup() {
+    var listeners = [];
+    function listen(address, callbacks) { listeners.push(Interceptor.attach(address, callbacks)); }
+    try {
+        var mod = findModule([POPUP.module || 'dvaui.dll']);
+        if (!mod) throw Error('popup paint module missing');
+        setupPopupMenu(listen);
+        (POPUP.paint_sources || []).forEach(function (source) {
+            var addr = exportAddr(mod, source.name);
+            if (!addr || hexAt(addr, source.bytes.length / 2) !== source.bytes)
+                throw Error('popup paint source changed');
+            var caller = addr.add(source.return_offset);
+            listen(addr, {onEnter: function (args) { popupSourceEnter.call(this, args, caller); },
+                          onLeave: popupSourceLeave});
+        });
+        POPUP.draw_exports.forEach(function (name) {
+            var addr = exportAddr(mod, name);
+            if (!addr) throw Error('popup paint export missing');
+            var expected = (POPUP.draw_bytes || {})[name];
+            if (expected && hexAt(addr, expected.length / 2) !== expected)
+                throw Error('popup paint entry bytes changed');
+            listen(addr, {onEnter: popupEnter, onLeave: textLeave});
+        });
+        POPUP_ON = true;
+    } catch (e) {
+        if (!POPUP.supplemental) throw e;
+        listeners.forEach(function (listener) { listener.detach(); });
+        MENU_ON = false;
+        POPUP_ON = false;
+        MENU_LAST = 'attach:' + String(e);
+    }
+}
+
+var LAYER_SCOPES = {}, LAYER_HITS = 0, LAYER_READER = null, LAYER_RETURN = null, LAYER_ON = false;
+function layerPopupEnter(args) {
+    var tid = this.threadId;
+    this.layerPrevious = LAYER_SCOPES[tid];
+    LAYER_SCOPES[tid] = null;
+    MENU_ACTIVE++;
+    if (!WANT) return;
+    try {
+        var path = args[LAYER_POPUP.path_arg];
+        if (!path.isNull() && effectPopupPath(readPopupPath(path, LAYER_READER))) LAYER_SCOPES[tid] = {};
+    } catch (e) { MENU_ERR++; MENU_LAST = 'layer-popup:' + String(e); }
+}
+function layerPopupLeave() {
+    var tid = this.threadId;
+    if (typeof this.layerPrevious === 'undefined') delete LAYER_SCOPES[tid];
+    else LAYER_SCOPES[tid] = this.layerPrevious;
+    MENU_ACTIVE--;
+}
+function layerLabelCall(args) {
+    var scope = LAYER_SCOPES[this.threadId];
+    if (!WANT || !scope || !this.returnAddress.equals(LAYER_RETURN)) return;
+    try {
+        var original = menuWS(args[1]);
+        var key = original.trim();
+        if (!key || key === '(-' || key.length > 256) return;
+        var translated = MAP[key];
+        if (typeof translated !== 'string' || !translated || translated === '(-' || translated === original) return;
+        this.layerLabel = mkWS(translated);
+        args[1] = this.layerLabel.obj;
+        LAYER_HITS++;
+        noteEnum(key);
+        noteApplied(key);
+    } catch (e) { MENU_ERR++; MENU_LAST = 'layer-label:' + String(e); }
+}
+function layerLabelReturned() {
+    this.layerLabel = null;
+}
+function setupLayerPopup() {
+    var p = LAYER_POPUP;
+    var scope = lib.base.add(p.scope_rva), call = lib.base.add(p.call_rva), ret = lib.base.add(p.ret_rva);
+    if (hexAt(scope, p.scope_bytes.length / 2) !== p.scope_bytes || hexAt(call, p.call_bytes.length / 2) !== p.call_bytes
+        || hexAt(ret, p.ret_bytes.length / 2) !== p.ret_bytes) throw Error('layer popup callsite changed');
+    var target = ret.add(call.add(2).readS32()).readPointer();
+    var module = Process.findModuleByAddress(target);
+    if (!module || ['u.dll', 'dvacore.dll', 'afterfxlib.dll'].indexOf(module.name.toLowerCase()) < 0)
+        throw Error('layer popup converter module changed');
+    var tdb = findModule(['TDB.dll']), reader = {};
+    Object.keys(p.helpers).forEach(function (key) {
+        var h = p.helpers[key], addr = exportAddr(tdb, h.name);
+        if (!addr || hexAt(addr, h.bytes.length / 2) !== h.bytes) throw Error('layer popup path reader changed');
+        reader[key] = new NativeFunction(addr, key === 'length' ? 'uint' : 'pointer',
+                                         key === 'component' ? ['pointer','uint'] : ['pointer']);
+    });
+    var listeners = [];
+    try {
+        LAYER_READER = reader;
+        LAYER_RETURN = ret;
+        listeners.push(Interceptor.attach(target, {onEnter:layerLabelCall,onLeave:layerLabelReturned}));
+        listeners.push(Interceptor.attach(scope, {onEnter:layerPopupEnter,onLeave:layerPopupLeave}));
+        LAYER_ON = true;
+    } catch (e) {
+        listeners.forEach(function (listener) { listener.detach(); });
+        throw e;
+    }
+}
+
+var popupActivityVT = null, popupActivitySeen = {}, popupActivityCount = 0;
+var popupActivityField = 0;
+var popupActivityQueue = [], popupActivityScheduled = false;
+function popupActivityEnter(args) {
+    if (!WANT) return;
+    try {
+        var stream = args[0];
+        if (!stream.readPointer().equals(popupActivityVT)) return;
+        var id = stream.toString();
+        var owner = stream.add(32).readPointer();
+        var definition = stream.add(popupActivityField).readPointer();
+        if (owner.isNull() || definition.isNull()) return;
+        var key = id + ':' + owner + ':' + definition;
+        if (popupActivitySeen[key] || popupActivityQueue.length >= 64) return;
+        if (popupActivityCount >= 4096) { popupActivitySeen = {}; popupActivityCount = 0; }
+        popupActivitySeen[key] = true;
+        popupActivityCount++;
+        popupActivityQueue.push(id);
+        if (popupActivityScheduled) return;
+        popupActivityScheduled = true;
+        setImmediate(function () {
+            var batch = popupActivityQueue;
+            popupActivityQueue = [];
+            popupActivityScheduled = false;
+            if (WANT && batch.length) send({popup_streams: batch});
+        });
+    } catch (e) { /* The discovery fallback handles unavailable owners. */ }
+}
+
+function watchPopupActivity(profile) {
+    if (popupActivityVT) return false;
+    var mod = findModule(['TDB.dll']);
+    if (!mod || mod.path.toLowerCase() !== profile.path.toLowerCase()) return false;
+    var addrs = Object.keys(profile.getters).map(function (name) {
+        var addr = exportAddr(mod, name), expected = profile.getters[name];
+        if (!addr || hexAt(addr, expected.length / 2) !== expected) throw Error('popup activity getter changed');
+        return addr;
+    });
+    var listeners = [];
+    try {
+        addrs.forEach(function (addr) { listeners.push(Interceptor.attach(addr, {onEnter: popupActivityEnter})); });
+        popupActivityField = profile.field_offset;
+        popupActivityVT = ptr(profile.vtable);
+        return listeners.length > 0;
+    } catch (e) {
+        listeners.forEach(function (listener) { listener.detach(); });
+        return false;
+    }
 }
 
 try {
@@ -570,19 +766,10 @@ try {
         Interceptor.attach(taddr, {onEnter: textEnter, onLeave: textLeave});
         TDRAW_ON = true;
     }
-    if (POPUP) {
-        var plib = findModule([POPUP.module || 'dvaui.dll']);
-        if (!plib) throw new Error('popup paint module missing');
-        POPUP.draw_exports.forEach(function (name) {
-            var addr = exportAddr(plib, name);
-            if (!addr) throw new Error('popup paint export missing');
-            var expected = (POPUP.draw_bytes || {})[name];
-            if (expected && hexAt(addr, expected.length / 2) !== expected)
-                throw new Error('popup paint entry bytes changed');
-            Interceptor.attach(addr, {onEnter: popupEnter, onLeave: textLeave});
-        });
-        setupPopupMenu();
-        POPUP_ON = true;
+    if (POPUP) setupPopup();
+    if (LAYER_POPUP) {
+        try { setupLayerPopup(); }
+        catch (e) { MENU_LAST = 'layer-attach:' + String(e); }
     }
 } catch (e) {
     try { Interceptor.detachAll(); } catch (x) {}
@@ -592,7 +779,8 @@ try {
 rpc.exports = {
     ready: function () {
         return !!(PRE_ON && POST_ON) && callIntact()
-            && (TEXT ? TDRAW_ON && SOURCE_ON : true) && (POPUP ? POPUP_ON && MENU_ON : true);
+            && (TEXT ? TDRAW_ON && SOURCE_ON : true)
+            && (!POPUP || POPUP.supplemental || (POPUP_ON && MENU_ON));
     },
     setmap: function (m) {
         try {
@@ -610,8 +798,10 @@ rpc.exports = {
         }
     },
     setpopupkeys: function (keys) { MENU_KEYS = keys || {}; return true; },
+    watchpopupactivity: watchPopupActivity,
     mode: function (on, wire) {
         if (typeof wire !== 'number' || wire < WIRE) return false;
+        if (WANT !== !!on) { popupActivitySeen = {}; popupActivityCount = 0; popupActivityQueue = []; }
         WIRE = wire; WANT = !!on; return true;
     },
     stats: function () {
@@ -631,8 +821,10 @@ rpc.exports = {
                 text_skip_invalid: T_SKIP_INVALID, text_err: T_ERR,
                 text_last: T_LAST, text_source_scoped: SOURCE_ON, popup_enabled: POPUP_ON,
                 popup_hits: P_HITS, popup_replaced: P_REPLACED,
-                popup_err: P_ERR, popup_skip_capacity: P_SKIP_CAP, popup_empty: P_EMPTY, popup_display_only: MENU_ON,
+                popup_err: P_ERR, popup_skip_capacity: P_SKIP_CAP, popup_empty: P_EMPTY,
+                popup_display_only: MENU_ON && !POPUP.supplemental,
                 menu_replaced: MENU_HITS, menu_err: MENU_ERR, menu_last: MENU_LAST,
+                layer_menu_enabled: LAYER_ON, layer_menu_replaced: LAYER_HITS,
                 // Revision only: stats() feeds the 1 Hz status.json, so the
                 // observation payload must never ride along (see observe()).
                 seen_rev: SEEN_REV};
@@ -676,6 +868,9 @@ class ParamDrawHook:
         self.text_profile = {}
         self.popup_paint_profile = {}
         self.popup_profile_error = ""
+        self.popup_activity = threading.Event()
+        self._activity_lock = threading.Lock()
+        self._visible_streams = set()
         self._lock = threading.RLock()
         self._gen = 0
         self._wire = 0
@@ -746,23 +941,27 @@ class ParamDrawHook:
                 self.text_profile = text_draw_profile(dvaui_path, allow_unknown=True)
             except (BuildMismatch, OSError):
                 self.text_profile = {}
-        # Only the 2026 cached control needs this paint supplement. Classic
-        # hosts retain typed popup definitions and their native rendering path.
         self.popup_paint_profile = {}
         self.popup_profile_error = ""
-        if self.text_profile:
-            try:
-                popup = popup_draw_profile(dvaui_path)
-                popup["menu"] = popup_menu_profile(dvaui_path)
-            except (BuildMismatch, OSError) as exc:
+        try:
+            menu = popup_menu_profile(dvaui_path)
+            popup = popup_draw_profile(dvaui_path, allow_unknown=True, scoped=not self.text_profile)
+            popup["menu"] = menu
+        except (BuildMismatch, ImportError, OSError) as exc:
+            if self.text_profile:
                 self.popup_profile_error = str(exc)[:160]
-            else:
-                self.popup_paint_profile = popup
+        else:
+            self.popup_paint_profile = popup
+        try:
+            layer_popup = popup_label_profile(self.afterfxlib_path)
+        except (BuildMismatch, ImportError, OSError):
+            layer_popup = None
         import frida
 
         src = (JS.replace("__MAP__", json.dumps(self.mapping, ensure_ascii=False))
                .replace("__EXTRA_SITES__", json.dumps(profile.get("additional_sites", [])))
                .replace("__POPUP__", json.dumps(self.popup_paint_profile or None, ensure_ascii=False))
+               .replace("__LAYER_POPUP__", json.dumps(layer_popup))
                .replace("__TEXT__",
                         json.dumps(self.text_profile or None,
                                    ensure_ascii=False))
@@ -799,10 +998,34 @@ class ParamDrawHook:
             self.last_error = str(message.get("description") or "")[:200]
         else:
             payload = message.get("payload") or {}
+            streams = payload.get("popup_streams") if isinstance(payload, dict) else None
+            if isinstance(streams, list):
+                with self._activity_lock:
+                    for item in streams[:64]:
+                        if len(self._visible_streams) >= 128:
+                            break
+                        try:
+                            address = int(item, 16)
+                            if 0 < address < 0x800000000000 and address % 8 == 0:
+                                self._visible_streams.add(address)
+                        except (ValueError, TypeError):
+                            continue
+                    if self._visible_streams:
+                        self.popup_activity.set()
             if isinstance(payload, dict) and payload.get("error"):
                 self.last_error = str(payload.get("error"))[:200]
                 self.error_count += 1
             # Normal script messages must not erase a write/attach error.
+
+    def watch_popup_activity(self, profile):
+        return bool(self.script and self.script.exports_sync.watchpopupactivity(profile))
+
+    def take_visible_streams(self):
+        with self._activity_lock:
+            streams = self._visible_streams
+            self._visible_streams = set()
+            self.popup_activity.clear()
+        return streams
 
     def set_map(self, mapping):
         with self._lock:

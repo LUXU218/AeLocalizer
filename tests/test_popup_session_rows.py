@@ -75,6 +75,15 @@ class PopupRowOwnershipTest(unittest.TestCase):
         self.assertEqual(guard._language_poll_interval("on", None), 1.0)
         self.assertEqual(guard._language_poll_interval("off", self._session()), 1.0)
 
+    def test_mode_switch_can_request_current_rows_first(self):
+        session = self._session()
+        session.scan_stats["rows"] = 2
+        result = (SimpleNamespace(version="v", flt_sha="f", tdb_sha="t", encoding="gbk"),
+                  [], set(), True)
+        with mock.patch("core.paramdiscovery.parameter_rows", return_value=result) as rows:
+            session.scan(prefer_current=True)
+        self.assertTrue(rows.call_args.kwargs["prefer_current"])
+
     def test_late_unlinked_record_cannot_apply(self):
         s = self._session()
         rows = _rows()
@@ -306,8 +315,9 @@ class _ProgressPopup:
         self.scans = 0
         self.applies = 0
 
-    def scan(self):
+    def scan(self, *, prefer_current=False):
         self.scans += 1
+        self.prefer_current = prefer_current
         return []
 
     def apply(self, mode, mapping):
@@ -326,6 +336,19 @@ class LanguageProgressSplitTest(unittest.TestCase):
         eng._refresh_mapping = lambda: True
         eng.attach = lambda host: None
         return eng
+
+    def test_switch_redraws_updated_classic_popup_without_blocking_retries(self):
+        for mode in ("on", "off"):
+            with self.subTest(mode=mode):
+                popup = _ProgressPopup(2, 2, changed=1)
+                eng = self._engine(popup)
+                with mock.patch("runtime.managed_guard._redraw_host",
+                                side_effect=lambda pid, **kw: seen.append((popup.applies, kw))):
+                    seen = []
+                    ok, reason = eng.apply(mode, {"pid": 1}, 7)
+                self.assertTrue(ok, reason)
+                self.assertTrue(popup.prefer_current)
+                self.assertEqual(seen, [(1, {"attempts": 1})])
 
     def test_complete_rows_with_background_discovery_is_ready(self):
         eng = self._engine(_ProgressPopup(2, 2, discovery_pending=True))
@@ -475,7 +498,7 @@ class PartialChannelTest(unittest.TestCase):
 
     def test_scan_time_popup_failure_drops_popup_not_params(self):
         class _Exploding:
-            def scan(self):
+            def scan(self, *, prefer_current=False):
                 raise RuntimeError("FLT build not verified: popup RTTI class not found")
 
             def close(self):

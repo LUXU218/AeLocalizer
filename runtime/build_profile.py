@@ -620,7 +620,7 @@ def text_draw_profile(path, sha=None, allow_unknown=False):
 
 
 
-def popup_draw_profile(path, sha=None, allow_unknown=False):
+def popup_draw_profile(path, sha=None, allow_unknown=False, *, scoped=False):
     """Verified paint-time string of the current dropdown selection.
 
     AE caches UI_Popup text separately from its typed TDB definition. Derive
@@ -652,9 +652,9 @@ def popup_draw_profile(path, sha=None, allow_unknown=False):
     known = {"18.2.0.37": 0x158, "22.6.0.64": 0x1a0,
              "23.0.0.59": 0x1c0, "24.1.0.78": 0x1c0,
              "25.5.0.4": 0x178, "26.5.0.89": 0x180}
-    if offset <= 0 or offset % 8 or (version and known.get(version) != offset):
+    if not 0 < offset <= 0x1000 or offset % 8 or (version and known.get(version) != offset):
         raise BuildMismatch("popup paint wstring offset mismatch")
-    return {"kind": "dvaui_popup_paint", "module": "dvaui.dll",
+    profile = {"kind": "dvaui_popup_paint", "module": "dvaui.dll",
             "path": os.path.abspath(path), "sha256": sha,
             "known_version": version, "verified_build": bool(version),
             "text_offset": offset, "len_offset": TEXT_LEN_OFFSET,
@@ -662,6 +662,21 @@ def popup_draw_profile(path, sha=None, allow_unknown=False):
             "draw_exports": [n.decode("ascii") for n in draws],
             "draw_bytes": {n.decode("ascii"): code_at(n, 12).hex() for n in draws},
             "gettext_export": getters[0].decode("ascii")}
+    if scoped:
+        sources = []
+        for name, draw in zip((b"UI_Popup", b"UI_PopupButton"), draws):
+            prefix = b"?UI_Draw@" + name + b"@"
+            matches = [n for n in exports if n.startswith(prefix)]
+            if len(matches) != 1:
+                raise BuildMismatch("classic popup paint source unavailable or ambiguous")
+            source = matches[0]
+            body = _popup_function(img, exports[source])
+            call = _popup_call_index(body, exports[draw])
+            after = body[call].address + body[call].size - exports[source]
+            sources.append({"name": source.decode("ascii"), "bytes": code_at(source, 12).hex(),
+                            "return_offset": after})
+        profile.update(supplemental=True, paint_sources=sources)
+    return profile
 
 
 def _rtti_vt_candidates(img, class_name):
@@ -878,6 +893,106 @@ def popup_field_layout(path, sha=None):
     return POPUP_FIELD_OFFSET
 
 
+def popup_activity_profile(path):
+    """Read-only notification when a typed popup definition is requested."""
+    image = PEImage(path)
+    exports = image.exports()
+    parent = exports.get(b"?GetParent@TDB_StreamBase@@QEBAPEBVTDB_StreamGroup@@XZ")
+    if not parent or image.read_rva(parent, 5) != bytes.fromhex("488b4120c3"):
+        raise BuildMismatch("popup activity parent layout changed")
+    text, base = image.text()
+    getters = {}
+    for name in (b"?GetParamDef@TDB_StreamBase@@QEBAPEBUPF_ParamDef@@XZ",
+                 b"?GetParamDef@TDB_StreamBase@@QEAAPEAUPF_ParamDef@@XZ"):
+        addr = exports.get(name)
+        if addr is not None and base <= addr <= base + len(text) - 12:
+            getters[name.decode("ascii")] = text[addr-base:addr-base+12].hex()
+    if not getters:
+        raise BuildMismatch("popup activity getter missing")
+    return {"path": os.path.abspath(path), "getters": getters}
+
+
+def _popup_export(exports, prefixes):
+    matches = [(name, rva) for name, rva in exports.items() if name.startswith(prefixes)]
+    if len(matches) != 1:
+        raise BuildMismatch("popup display export unavailable or ambiguous")
+    return matches[0]
+
+
+def _popup_function(image, start):
+    from capstone import Cs, CS_ARCH_X86, CS_MODE_64
+
+    directory, size = image.exception_dir
+    code, base = image.text()
+    for first, end, _ in struct.iter_unpack("<III", image.read_rva(directory, size)):
+        if first == start and base <= first < end <= base + len(code):
+            decoder = Cs(CS_ARCH_X86, CS_MODE_64)
+            return list(decoder.disasm(code[first-base:end-base], first))
+    raise BuildMismatch("popup function boundary unavailable")
+
+
+def _popup_call_index(body, target):
+    calls = [i for i, op in enumerate(body) if op.mnemonic == "call" and op.op_str == hex(target)]
+    if len(calls) != 1:
+        raise BuildMismatch("popup display callsite unavailable or ambiguous")
+    return calls[0]
+
+
+def popup_label_profile(path):
+    """Locate the CLayer effect-menu label conversion from the actual host code."""
+    image = PEImage(path)
+    exports = image.exports()
+    scope_name, scope = _popup_export(exports, (
+        b"?RebuildPopupParamMenu@CLayer@@QEAAXAEBVTDB_StreamIDPath@@_NAEAVUI_MenuSpec@@",
+        b"?RebuildPopupParamMenu@CLayer@@QEBA?AVUI_MenuSpec@@AEBVTDB_StreamIDPath@@",
+    ))
+    path_arg = 1 if b"@@QEAAX" in scope_name else 2
+    _, leaf = _popup_export(exports, (
+        b"?MakePopupData@CLayer@@AEBA?AVUI_MenuSpec@@AEBUPF_ParamDef@@",
+        b"?GetPopupData@CLayer@@AEAAXAEBUPF_ParamDef@@AEAVUI_MenuSpec@@",
+    ))
+    _, getter = _popup_export(exports, b"?GetPopupItemString@CLayer@@")
+    code = _popup_function(image, leaf)
+    calls = []
+    label_local = ""
+    for index, instruction in enumerate(code):
+        if instruction.mnemonic != "call":
+            continue
+        if instruction.op_str == hex(getter):
+            label_local = ""
+            for m in range(max(1, index - 12), index):
+                store = code[m]
+                load = code[m - 1]
+                if store.mnemonic == "mov" and store.op_str.startswith("qword ptr [rsp + 0x20], "):
+                    register = store.op_str.rsplit(", ", 1)[1]
+                    if load.mnemonic == "lea" and load.op_str.startswith(register + ", ["):
+                        label_local = load.op_str.split(", ", 1)[1]
+            continue
+        if label_local and instruction.bytes[:2] == b"\xff\x15":
+            args = code[index-2:index]
+            if (len(args) == 2 and args[0].mnemonic == args[1].mnemonic == "lea"
+                    and args[0].op_str == "rdx, " + label_local and args[1].op_str.startswith("rcx, [")):
+                calls.append(instruction)
+            label_local = ""
+    if len(calls) != 1:
+        raise BuildMismatch("popup label conversion unavailable or ambiguous")
+    call = calls[0]
+    after = call.address + call.size
+    tdb = PEImage(os.path.join(os.path.dirname(os.path.abspath(path)), "TDB.dll"))
+    tdb_exports = tdb.exports()
+    helpers = {}
+    for key, prefix in (("length", b"?GetLength@TDB_StreamIDPath@@QEBAIXZ"),
+                        ("component", b"?GetComponent@TDB_StreamIDPath@@QEBAAEBVTDB_StreamID@@I@Z"),
+                        ("match", b"?GetMatchName@TDB_StreamID@@QEBAAEBVTDB_MatchName@@XZ"),
+                        ("name", b"?GetName@TDB_MatchName@@QEBAPEBEXZ")):
+        name, rva = _popup_export(tdb_exports, prefix)
+        helpers[key] = {"name": name.decode("ascii"), "bytes": tdb.read_rva(rva, 12).hex()}
+    return {"scope_rva": scope, "scope_bytes": image.read_rva(scope, 12).hex(),
+            "path_arg": path_arg, "helpers": helpers,
+            "call_rva": call.address, "call_bytes": call.bytes.hex(),
+            "ret_rva": after, "ret_bytes": image.read_rva(after, 8).hex()}
+
+
 def media_popup_field_layout(tdb_path, tdb_sha, media_path, media_sha):
     """Verify a TDB wrapper that delegates the typed option storage to MediaFoundation."""
     import pefile
@@ -949,70 +1064,67 @@ def media_popup_field_layout(tdb_path, tdb_sha, media_path, media_sha):
 
 
 def popup_menu_profile(path):
-    """AE2026 scoped menu-label construction, without translating metadata."""
-    sha = _require_verified(path, None, "dvaui", False)
-    if known_version("dvaui", sha) != "26.5.0.89":
-        raise BuildMismatch("popup menu display path is not verified")
+    """Verified scoped menu-label construction, without translating metadata."""
     folder = os.path.dirname(os.path.abspath(path))
-    images = {"dvaui": PEImage(path)}
-    for kind, file in (("afterfxlib", "AfterFXLib.dll"), ("tdb", "TDB.dll")):
-        target = os.path.join(folder, file)
-        _require_verified(target, None, kind, False)
-        images[kind] = PEImage(target)
+    images = {"dvaui": PEImage(path), "afterfxlib": PEImage(os.path.join(folder, "AfterFXLib.dll")),
+              "tdb": PEImage(os.path.join(folder, "TDB.dll"))}
     exports = {k: v.exports() for k, v in images.items()}
-    def symbol(module, prefix):
-        found = [n for n in exports[module] if n.startswith(prefix.encode("ascii"))]
-        if len(found) != 1:
-            raise BuildMismatch("popup menu export unavailable/ambiguous: " + prefix)
-        return found[0].decode("ascii")
     specs = {
-        "builder": ("dvaui", "?BuildUIMenuFromItems@UI_Popup@"),
         "osbuilder": ("dvaui", "?DoPopupMenu@UI_Popup@controls@dvaui@@MEAAX"),
         "custom": ("dvaui", "?DoCustomDrawnFlyoutMenu@UI_Popup@"),
         "flyoutitem": ("dvaui", "?CreateFlyoutMenuItem@UI_Popup@"),
         "flyoutctor": ("dvaui", "??0BasicMenuItem@controls@dvaui@@QEAA@HAEBV?$basic_string@E"),
         "osappend": ("dvaui", "?AppendItem@OS_Menu@utility@dvaui@@UEAAHAEBV?$basic_string@_WU?$char_traits@_W@std@@U?$STLAllocator@_W@allocator@dvacore@@@std@@V?$IntrusivePtr"),
-        "append": ("dvaui", "?AppendItem@UI_Menu@controls@dvaui@@QEAA?AV?$IntrusivePtr@VUI_MenuItem@"),
         "items": ("dvaui", "?GetItems@UI_Popup@"),
         "parent": ("dvaui", "?UI_GetParentNode@UI_Node@ui@dvaui@@QEBAPEBV"),
-        "path": ("afterfxlib", "?GetStreamPath@CECStreamV2@"),
+        "path": ("afterfxlib", "?GetStreamPath@CECStreamV2@internal@ecp@@"),
         "dtor": ("tdb", "??1TDB_StreamIDPath@@"),
         "length": ("tdb", "?GetLength@TDB_StreamIDPath@@"),
         "component": ("tdb", "?GetComponent@TDB_StreamIDPath@@"),
         "match": ("tdb", "?GetMatchName@TDB_StreamID@@"),
         "name": ("tdb", "?GetName@TDB_MatchName@@"),
     }
-    symbols = {key: {"module": mod, "name": symbol(mod, prefix)}
-               for key, (mod, prefix) in specs.items()}
+    if any(name.startswith(b"?BuildUIMenuFromItems@UI_Popup@") for name in exports["dvaui"]):
+        specs.update(builder=("dvaui", "?BuildUIMenuFromItems@UI_Popup@"),
+                     append=("dvaui", "?AppendItem@UI_Menu@controls@dvaui@@QEAA?AV?$IntrusivePtr@VUI_MenuItem@"))
+    symbols = {}
+    addresses = {}
+    for key, (kind, prefix) in specs.items():
+        name, rva = _popup_export(exports[kind], prefix.encode("ascii"))
+        addresses[key] = rva
+        symbols[key] = {"module": kind, "name": name.decode("ascii"),
+                        "bytes": images[kind].read_rva(rva, 12).hex()}
+    getter = images["afterfxlib"].read_rva(addresses["path"], 27)
+    if not re.fullmatch(rb"\x40\x53\x48\x83\xec\x30\x48\x8b\x01\x48\x8b\xda\xff\x90...."
+                        rb"\x48\x8b\xc3\x48\x83\xc4\x30\x5b\xc3", getter, re.S):
+        raise BuildMismatch("effect popup path return ABI changed")
+    if images["tdb"].read_rva(addresses["length"], 12) != bytes.fromhex("488bc1488b4910482b480848"):
+        raise BuildMismatch("effect popup path bounds layout changed")
     image = images["dvaui"]
-    code, base = image.text()
-    builder = exports["dvaui"][symbols["builder"]["name"].encode("ascii")]
-    append = exports["dvaui"][symbols["append"]["name"].encode("ascii")]
-    start = builder - base
-    calls = []
-    for offset in range(0x400):
-        pos = start + offset
-        if code[pos] == 0xe8:
-            target = builder + offset + 5 + struct.unpack_from("<i", code, pos + 1)[0]
-            if target == append:
-                calls.append(offset)
-    if calls != [0x1f2]:
-        raise BuildMismatch("popup menu label callsite changed: %r" % calls)
-    os_builder = exports["dvaui"][symbols["osbuilder"]["name"].encode("ascii")]
-    os_start = os_builder - base
-    if code[os_start+0x17b:os_start+0x17e] != bytes.fromhex("ff5038"):
-        raise BuildMismatch("OS popup menu label callsite changed")
-    custom = exports["dvaui"][symbols["custom"]["name"].encode("ascii")]
-    flyout = exports["dvaui"][symbols["flyoutitem"]["name"].encode("ascii")]
-    ctor = exports["dvaui"][symbols["flyoutctor"]["name"].encode("ascii")]
-    for owner, offset, target in ((custom, 0x75e, flyout), (flyout, 0xa3b, ctor)):
-        pos = owner - base + offset
-        if code[pos] != 0xe8 or owner+offset+5+struct.unpack_from("<i",code,pos+1)[0] != target:
-            raise BuildMismatch("custom popup label callsite changed")
-    return {"symbols": symbols,
-            "flyout_item_return_offset": 0x763,
-            "flyout_ctor_return_offset": 0xa40,
-            "os_builder_bytes": code[os_start:os_start+12].hex(),
-            "os_label_return_offset": 0x17e,
-            "builder_bytes": code[start:start+12].hex(),
-            "label_return_offset": calls[0] + 5, "descriptor_stride": 0x110}
+    profile = {"symbols": symbols}
+    if "builder" in symbols:
+        body = _popup_function(image, addresses["builder"])
+        call = body[_popup_call_index(body, addresses["append"])]
+        profile.update(builder_bytes=symbols["builder"]["bytes"],
+                       label_return_offset=call.address + call.size - addresses["builder"])
+    body = _popup_function(image, addresses["osbuilder"])
+    calls = [op for i, op in enumerate(body) if i >= 2 and op.bytes == bytes.fromhex("ff5038")
+             and body[i-2].mnemonic == body[i-1].mnemonic == "mov"
+             and body[i-2].op_str.startswith("rdx, ") and body[i-1].op_str.startswith("rcx, ")]
+    if len(calls) != 1:
+        raise BuildMismatch("OS popup menu label callsite unavailable or ambiguous")
+    body = _popup_function(image, addresses["custom"])
+    i = _popup_call_index(body, addresses["flyoutitem"])
+    item = body[i]
+    step = image.read_rva(item.address + item.size, 8)
+    stride = struct.unpack_from("<I", step, 4)[0]
+    if step[:4] != b"\x90\x48\x81\xc3" or not 32 <= stride <= 2048 or stride % 8:
+        raise BuildMismatch("popup descriptor stride changed")
+    body = _popup_function(image, addresses["flyoutitem"])
+    label = body[_popup_call_index(body, addresses["flyoutctor"])]
+    profile.update(descriptor_stride=stride,
+                   flyout_item_return_offset=item.address + item.size - addresses["custom"],
+                   flyout_ctor_return_offset=label.address + label.size - addresses["flyoutitem"],
+                   os_builder_bytes=symbols["osbuilder"]["bytes"],
+                   os_label_return_offset=calls[0].address + calls[0].size - addresses["osbuilder"])
+    return profile

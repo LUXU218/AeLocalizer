@@ -18,10 +18,10 @@ import sys
 import time
 
 try:                                    # deployed flat next to guard_uni.py
-    from build_profile import (POPUP_FIELD_OFFSET, BuildMismatch, known_version,
+    from build_profile import (POPUP_FIELD_OFFSET, BuildMismatch, known_version, popup_activity_profile,
                                media_popup_field_layout, popup_field_layout, popup_profile)
 except ImportError:                     # imported as runtime.popup_session
-    from .build_profile import (POPUP_FIELD_OFFSET, BuildMismatch, known_version,
+    from .build_profile import (POPUP_FIELD_OFFSET, BuildMismatch, known_version, popup_activity_profile,
                                 media_popup_field_layout, popup_field_layout, popup_profile)
 
 # AE2025 25.5.0.4 historical value. Real sessions derive the vtable from the
@@ -153,6 +153,15 @@ class PopupSession:
     def _pkey(self, effect, param, plugin=""):
         return "%s|%s|%s\x1f%s" % (self.identity, plugin, effect, param)
 
+    def activity_profile(self):
+        process, _flt = self._open()
+        try:
+            tdb = next(m for m in process.modules() if m["name"].casefold() == "tdb.dll")
+            return dict(popup_activity_profile(tdb["path"]), vtable=hex(self._vt),
+                        field_offset=POPUP_FIELD_OFFSET)
+        finally:
+            self._close()
+
     def _sync_persist(self):
         try:
             for ptr, b in self.baseline.items():
@@ -253,7 +262,7 @@ class PopupSession:
         self.records.append(rec)
         self._pass_seen.add(key)
 
-    def scan(self):
+    def scan(self, *, prefer_current=False, visible_streams=()):
         """Incremental typed scan; retention is safe across partial passes."""
         from core.paramdiscovery import parameter_rows
 
@@ -265,7 +274,8 @@ class PopupSession:
         try:
             profile, rows, _parades, pending = parameter_rows(
                 p, self.data_root, deadline=disc_deadline, with_state=True,
-                rescan_interval=2.0, parade_scan_budget=parade_budget)
+                rescan_interval=2.0, parade_scan_budget=parade_budget,
+                prefer_current=prefer_current, visible_streams=visible_streams, popup_ownership=True)
             encoding = str(getattr(profile, "encoding", "") or self.encoding).lower()
             if encoding not in ("utf8", "utf-8", "mbcs", "gbk"):
                 raise RuntimeError("unsupported popup encoding: " + encoding)
@@ -296,6 +306,9 @@ class PopupSession:
             # budget and before any string read/apply. A later chunk's owner
             # sharing a pointer blocks it before the first write.
             self._build_current_ownership(p, rows, vt)
+            if visible_streams:
+                # Foreground rows precede the current background cursor.
+                self._pass_active = False
             # Budget starts only after the full ownership prepass, and always
             # grants a small minimum slice so a slow index cannot pin cursor=0.
             now = time.monotonic()
@@ -317,6 +330,8 @@ class PopupSession:
                     break
                 row = rows[idx]
                 idx += 1
+                if not (row.get("effectMatchName") and row.get("matchName")):
+                    continue  # Still participates in the alias index above.
                 addr = int(row.get("address") or 0)
                 try:
                     if p.read(addr + 8, 16).hex() != row.get("guid"):
@@ -496,35 +511,19 @@ class PopupSession:
                 if mode == "off":
                     target = rec["original"]
                 else:
-                    if rec["raw"] != rec["original"]:
-                        # 已经是本会话/其它来源的中文，刷新时不重复翻译。
+                    base = self.baseline.get(rec["pointer"])
+                    if rec["raw"] != rec["original"] and not (
+                            base and base.get("last") == rec["raw"]
+                            and base.get("original") == rec["original"]
+                            and all(base.get(key) == rec[key] for key in
+                                    ("address", "guid", "parent", "pointer"))):
                         unchanged += 1
                         _why("unchanged-already")
                         continue
-                    parts = rec["text"].split("|")
-                    trans = []
-                    item_changed = False
-                    native_cjk = False
-                    for part in parts:
-                        if not part:
-                            trans.append("")
-                            continue
-                        if any("\u3400" <= ch <= "\u9fff" for ch in part):
-                            native_cjk = True
-                            trans.append(part)
-                            continue
-                        tr = mapping.get(part.strip())
-                        if tr:
-                            trans.append(tr)
-                            item_changed = item_changed or (tr != part)
-                        else:
-                            # 未命中/数字/序号保留原文，不因一个 missing 整串放弃。
-                            trans.append(part)
-                    if not item_changed:
-                        unchanged += 1
-                        _why("unchanged-no-translation")
-                        continue
                     try:
+                        parts = rec["original"].decode(self.encoding).split("|")
+                        trans = [part if not part or any("\u3400" <= ch <= "\u9fff" for ch in part)
+                                 else mapping.get(part.strip()) or part for part in parts]
                         target = "|".join(trans).encode(self.encoding)
                     except UnicodeError:
                         skipped += 1
@@ -532,7 +531,12 @@ class PopupSession:
                         continue
                 if target == rec["raw"]:
                     unchanged += 1
-                    _why("off-already")
+                    if mode == "off":
+                        _why("off-already")
+                    elif target == rec["original"]:
+                        _why("unchanged-no-translation")
+                    else:
+                        _why("unchanged-already")
                     continue
                 if len(target) + 1 > rec["capacity"]:
                     skipped += 1

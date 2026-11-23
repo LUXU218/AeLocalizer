@@ -4,8 +4,21 @@ from types import SimpleNamespace
 from unittest import mock
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from runtime import param_draw_hook as ph
+from runtime import build_profile as bp
 
 class PopupPaintSelectionTests(unittest.TestCase):
+    def test_six_hosts_share_automatic_popup_activity_and_menu_label_discovery(self):
+        root = Path(r'C:\Program Files\Adobe')
+        for year in range(2021, 2027):
+            with self.subTest(year=year):
+                folder = root / ('Adobe After Effects ' + str(year)) / 'Support Files'
+                activity = bp.popup_activity_profile(folder / 'TDB.dll')
+                self.assertEqual(len(activity['getters']), 2)
+                profile = bp.popup_label_profile(folder / 'AfterFXLib.dll')
+                self.assertIn(profile['path_arg'], (1, 2))
+                self.assertTrue(profile['call_bytes'].startswith('ff15'))
+                self.assertEqual(profile['ret_rva'] - profile['call_rva'], 6)
+
     def setup_hook(self,year):
         script=mock.Mock();script.exports_sync.ready.return_value=True
         session=mock.Mock();session.create_script.return_value=script
@@ -19,6 +32,24 @@ class PopupPaintSelectionTests(unittest.TestCase):
              mock.patch.object(ph,'popup_draw_profile',side_effect=AssertionError('extra popup hook on classic host')):
             self.assertTrue(hook.attach())
         self.assertEqual(hook.popup_paint_profile,{})
+
+    def test_verified_2025_can_translate_during_first_draw_and_menu_open(self):
+        hook, agent = self.setup_hook(2025)
+        with mock.patch.dict(sys.modules, {'frida': agent}):
+            self.assertTrue(hook.attach())
+        profile = hook.popup_paint_profile
+        self.assertTrue(profile['supplemental'])
+        self.assertEqual(profile['menu']['descriptor_stride'], 0x98)
+        self.assertEqual(len(profile['paint_sources']), 2)
+        self.assertNotIn('builder', profile['menu']['symbols'])
+
+    def test_supported_menu_shapes_do_not_require_a_version_hash(self):
+        root = Path(r'C:\Program Files\Adobe')
+        with mock.patch.dict(bp.VERIFIED_DVAUI, {}, clear=True):
+            for year, stride in ((2025, 0x98), (2026, 0x110)):
+                with self.subTest(year=year):
+                    dll = root / ('Adobe After Effects ' + str(year)) / 'Support Files/dvaui.dll'
+                    self.assertEqual(bp.popup_menu_profile(dll)['descriptor_stride'], stride)
 
     def test_2026_keeps_the_cache_fix(self):
         hook,agent=self.setup_hook(2026)
