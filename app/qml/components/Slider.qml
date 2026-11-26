@@ -18,7 +18,6 @@ Item {
     function apply(mx) {
         var t = Math.min(1, Math.max(0, (mx - 6) / Math.max(1, width - 12)))
         var v = min + t * (max - min)
-        value = v
         moved(v)
     }
 
@@ -53,7 +52,7 @@ Item {
         cursorShape: Qt.PointingHandCursor
         // 滑杆嵌在滚动区时需要保留拖动手势。
         preventStealing: true
-        onPressed: function(mouse) { slider.apply(mouse.x) }
-        onPositionChanged: function(mouse) { if (pressed) slider.apply(mouse.x) }
+        onPressed: function(mouse) { slider.apply(mouse.x + x) }
+        onPositionChanged: function(mouse) { if (pressed) slider.apply(mouse.x + x) }
     }
 }

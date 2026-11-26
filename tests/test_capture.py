@@ -97,6 +97,78 @@ class TestCapture(unittest.TestCase):
         self.assertTrue(by_en["S_Glow"].get("junk"))
         self.assertEqual(ens[-1], "S_Glow")
 
+    def test_checkbox_channel_evidence(self):
+        from unittest.mock import patch
+        classic = {"profile": {"checkbox_sites": [{}]}, "pre_hooked": True,
+                   "post_hooked": True, "call_intact": True}
+        for draw, expected in [
+            ({}, "未验证"), ({"checkbox_widget": False}, "未验证"),
+            (dict(classic, checkbox_error="caption changed", checkbox_observed=False), "未通过校验"),
+            (dict(classic, post_hooked=False), "未验证"),
+            (dict(classic, checkbox_observed=False), "尚未观察"),
+            ({"checkbox_widget": True, "checkbox_observed": False}, "尚未观察"),
+            ({"checkbox_widget": True}, "尚未提供"),
+            ({"checkbox_widget": True, "checkbox_observed": True}, None),
+        ]:
+            with self.subTest(draw=draw), patch("app.backend.engine.control_status",
+                    return_value={"control_ready": True, "draw_stats": draw}):
+                messages = self.b._capture_channel_status()
+                if expected is None:
+                    self.assertEqual(messages, [])
+                else:
+                    self.assertIn(expected, messages[0])
+
+    def test_capture_preserves_independent_widget_evidence(self):
+        from unittest.mock import patch
+        with patch.object(self.b, "_read_capture_labels", return_value=[
+            {"kind": "param", "en": "Blur Amount", "painted": True},
+            {"kind": "checkbox", "en": "Blur Amount", "painted": False},
+            {"kind": "enum", "en": "New Option", "painted": False},
+        ]):
+            rows = {(x["en"], x["kind"]): x for x in self.b.captureMissingParams()["items"]}
+        self.assertNotIn(("Blur Amount", "param"), rows)
+        self.assertEqual(rows["Blur Amount", "checkbox"]["status"], "not_applied")
+        self.assertEqual(rows["New Option", "enum"]["status"], "missing")
+
+    def test_scoped_override_roundtrip_keeps_global_dictionary_unchanged(self):
+        path = Path(self._hookdir, "out", "label_diagnostics.json")
+        path.write_text(json.dumps({"scopes": [
+            {"effect": "A", "parameter": "A-1", "en": "Screen"},
+            {"effect": "B", "parameter": "B-1", "en": "Screen"},
+        ]}), encoding="utf-8")
+        try:
+            self.assertTrue(self.b.saveEffectOption("A", "A-1", "Screen", "仅甲"))
+            self.assertFalse(self.b.saveEffectOption("A", "A-2", "Screen", "不保存"))
+            values = {(x["effect"], x["parameter"]): x["zh"] for x in self.b.captureEffectOptions()}
+            self.assertEqual(values, {("A", "A-1"): "仅甲", ("B", "B-1"): ""})
+            self.assertTrue(self.b.saveEffectOption("A", "A-1", "Screen", ""))
+            self.assertEqual(self.b._read_scoped_popup(), {})
+        finally:
+            path.unlink()
+
+    def test_verified_menu_keys_require_explicit_lookup_and_do_not_cross_effects(self):
+        path = Path(self._hookdir, "out", "label_diagnostics.json")
+        try:
+            self.assertFalse(path.exists())
+            empty = self.b.effectOptionState(False)
+            self.assertEqual(empty["options"], [])
+            self.assertIn("没有可读取", empty["message"])
+            path.write_text(json.dumps({"scopes": [], "rows": [{"kind": "enum"}]}))
+            self.assertIn("尚无可确认", self.b.effectOptionState(False)["message"])
+            keys = self.b.effectOptionState(True)["options"]
+            self.assertEqual([(r["effect"], r["parameter"], r["en"]) for r in keys],
+                             [("S_Glow", "S_Glow-0530", "Union"),
+                              ("S_Mosaic", "S_Mosaic-0530", "Union")])
+            self.assertFalse(self.b.saveEffectOption("S_Mosaic", "S_Glow-0530", "Union", "错误"))
+            self.assertFalse(self.b.saveEffectOption("S_Glow", "S_Glow-0530", "1", "错误"))
+            self.assertTrue(self.b.saveEffectOption("S_Glow", "S_Glow-0530", "Union", "仅发光"))
+            self.assertEqual([r["zh"] for r in self.b.effectOptionState(True)["options"]],
+                             ["仅发光", ""])
+            self.assertTrue(self.b.saveEffectOption("S_Glow", "S_Glow-0530", "Union", ""))
+            self.assertEqual(self.b.captureEffectOptions(), [])
+        finally:
+            path.unlink(missing_ok=True)
+
     def test_capture_includes_enum_missing(self):
         """★ 2026-10-26 通用下拉：枚举缺词并入提取列表（kind=enum）。"""
         r = self.b.captureMissingParams()

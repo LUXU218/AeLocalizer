@@ -14,13 +14,13 @@ class PopupMenuScopeTests(unittest.TestCase):
         result = q.evaluate('''
 var WANT=true, LAYER_POPUP={path_arg:2}, MENU_ACTIVE=0, MENU_ERR=0;
 var MAP={Screen:'滤色', Add:'相加', '(-':'分隔线'};
-function effectPopupPath(path){return path==='effect';}
+function effectScopeKey(path){return path==='effect' ? 'BCC\x1fmode' : '';}
 function readPopupPath(path){return path.name;}
 function menuWS(label){return label;}
 function mkWS(label){return {obj:'converted:'+label};}
 function noteEnum(label){} function noteApplied(label){}
 function path(name){return {name:name,isNull:function(){return false;}};}
-''' + JS[start:end] + '''
+''' + OBSERVE + JS[start:end] + '''
 LAYER_RETURN=42;
 function convert(thread, caller, text){
     var output={}, options=0, args=[output,text,options];
@@ -102,7 +102,7 @@ function draw(thread, caller) {
     textLeave.call(frame);
     return rendered;
 }
-''' + JS[start:end] + JS[path_start:path_end] + '''
+''' + OBSERVE + JS[start:end] + JS[path_start:path_end] + '''
 var source = {threadId:1};
 popupSourceEnter.call(source, ['ADBE Effect Parade'], address(17));
 var first = draw(1,17), wrongSite = draw(1,18), wrongThread = draw(2,17);
@@ -172,6 +172,21 @@ menuAppendLeave.call(ctx);menuBuildLeave.call(b);
 result.push(ctx.menuLabel===null,MENU_ACTIVE===0,Object.keys(MENU_SCOPE).length===0,MENU_ERR===0);
 JSON.stringify(result);
 ''');self.assertEqual(v.toString(),'[true,true,true,true,true,true,true,true,true,true]')
+    def test_scoped_value_isolated_by_effect_and_parameter(self):
+        q = self.engine()
+        actual = q.evaluate(r'''
+MAP['BCC\x1fmode\x1fOff'] = '仅甲';
+function translated(scope) {
+    var a=args('Off',1), c={threadId:1,returnAddress:callsite(7)};
+    MENU_SCOPE['1']=[{labels:['Off'],scope:scope}];
+    menuAppendEnter.call(c,a);
+    return a[2];
+}
+JSON.stringify([translated('BCC\x1fmode'),translated('Other\x1fmode'),
+                translated('BCC\x1fother'),translated('')]);
+''')
+        self.assertEqual(actual.toString(), '["translated:仅甲","translated:关","translated:关","translated:关"]')
+
     def test_other_callsite_wrong_item_and_unqualified_control_are_untouched(self):
         q=self.engine();v=q.evaluate('''
 var b={threadId:1};menuBuildEnter.call(b,['known']);
@@ -198,7 +213,7 @@ JSON.stringify([a[2]===original,MENU_ACTIVE===0,Object.keys(MENU_SCOPE).length==
 ''');self.assertEqual(v.toString(),'[true,true,true]')
     def test_os_menu_changes_only_copied_label_not_position_or_submenu(self):
         q=self.engine();v=q.evaluate('''
-var osMenuReturn={id:9};MENU_SCOPE['1']=[{labels:['Off']}];
+var osMenuReturn={id:9};MENU_SCOPE['1']=[{labels:['Off'],osCurrent:{scope:''}}];
 osMenuOriginal=function(context,arg){return 'Off';};mkWS=function(s){return {obj:'translated:'+s,buf:'owned'};};
 var a=['os-menu','original-label','submenu'],call={threadId:1,returnAddress:callsite(9)};
 menuOsAppendEnter.call(call,a);

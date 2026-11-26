@@ -1,39 +1,56 @@
 import QtQuick
+import QtQuick.Layouts
 import AeLocalizer
 
 Rectangle {
     id: shell
     default property alias content: contentData.data
     property string title: ""
+    property string description: ""
+    property Component actions
 
-    readonly property int gutter: Math.round(Theme.spaceMd
-                              + (Theme.spaceLg - Theme.spaceMd) * Math.max(0, Math.min(1, (width - 700) / 200)))
-
+    readonly property int gutter: Math.round(Theme.spaceMd + (Theme.spaceXl - Theme.spaceMd)
+                                             * Math.max(0, Math.min(1, (width - 650) / 300)))
     color: Theme.hasAnyBg ? "transparent" : Theme.workspaceFill
     clip: true
-    opacity: visible ? 1 : 0
-    Behavior on opacity { NumberAnimation { duration: Theme.durFast; easing.type: Easing.OutQuad } }
 
-    Item {
+    RowLayout {
         id: head
         anchors.top: parent.top
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.leftMargin: shell.gutter
         anchors.rightMargin: shell.gutter
-        height: Math.round(Math.max(52, Math.min(64, 52 + (shell.height - 460) / 15)))
+        height: shell.height < 525 ? 54 : Math.max(76, Theme.fontMetric + Theme.fontSmall + 40)
+        spacing: Theme.spaceMd
 
-        Text {
-            anchors.left: parent.left
-            anchors.verticalCenter: parent.verticalCenter
-            text: shell.title
-            color: Theme.textOnBg
-            font.family: Theme.fontFamily
-            font.pixelSize: Theme.fontMetric
-            font.weight: Font.DemiBold
+        ColumnLayout {
+            Layout.fillWidth: true
+            spacing: 3
+            Text {
+                Layout.fillWidth: true
+                text: shell.title
+                color: Theme.textOnBg
+                font.family: Theme.fontFamily
+                font.pixelSize: Theme.fontMetric
+                font.weight: Font.DemiBold
+                elide: Text.ElideRight
+            }
+            Text {
+                Layout.fillWidth: true
+                visible: shell.height >= 525 && text !== ""
+                text: shell.description
+                color: Theme.textOnBgSecondary
+                font.family: Theme.fontFamily
+                font.pixelSize: Theme.fontSmall
+                elide: Text.ElideRight
+            }
+        }
+        Loader {
+            active: !!shell.actions
+            sourceComponent: shell.actions
         }
     }
-
     Item {
         id: contentData
         anchors.top: head.bottom

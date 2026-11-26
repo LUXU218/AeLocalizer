@@ -43,9 +43,9 @@ Item {
 
             background: Rectangle {
                 radius: Theme.radiusControl
-                color: Theme.insetFill
-                border.width: search.activeFocus ? 1 : 0
-                border.color: Theme.accent
+                color: Theme.fieldFill
+                border.width: search.activeFocus ? 2 : 1
+                border.color: search.activeFocus ? Theme.focusRing : Theme.controlStroke
             }
 
             Text {
@@ -136,6 +136,8 @@ Item {
                 background: Rectangle {
                     radius: Theme.radiusControl
                     color: group.hovered || group.visualFocus ? Theme.bgHover : "transparent"
+                    border.width: group.visualFocus ? 2 : 0
+                    border.color: Theme.focusRing
 
                     Rectangle {
                         anchors.left: parent.left

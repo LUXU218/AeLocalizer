@@ -114,11 +114,10 @@ ColumnLayout {
         }
     }
 
-    Rectangle {
+    Surface {
         Layout.fillWidth: true
         Layout.fillHeight: true
         Layout.minimumHeight: 120
-        color: Theme.panelFill
         radius: Theme.radiusDialog
         clip: true
 
@@ -309,30 +308,10 @@ ColumnLayout {
         onAccepted: page.controller.preview(selectedFile)
     }
 
-    Controls.Dialog {
+    PanelReviewDialog {
         id: review
-        objectName: "panelApplyDialog"
-        title: page.signedCopy ? "确认安装汉化副本" : "应用预览"
-        parent: Controls.Overlay.overlay
-        anchors.centerIn: parent
-        implicitWidth: 465
-        modal: true
-        standardButtons: Controls.Dialog.Ok | Controls.Dialog.Cancel
-        onOpened: {
-            standardButton(Controls.Dialog.Ok).text = "确认"
-            standardButton(Controls.Dialog.Cancel).text = "取消"
-        }
         onAccepted: page.controller.commit()
         onRejected: page.controller.cancelReview()
-        contentItem: Controls.ScrollView {
-            implicitHeight: Math.min(reviewDetails.implicitHeight, 250)
-            Basic.TextArea {
-                id: reviewDetails
-                readOnly: true
-                textFormat: TextEdit.PlainText
-                wrapMode: TextEdit.WrapAnywhere
-            }
-        }
     }
 
     Controls.Dialog {
@@ -359,7 +338,7 @@ ColumnLayout {
     Connections {
         target: page.controller
         function onReviewReady(details) {
-            reviewDetails.text = details
+            review.preview = details
             review.open()
         }
     }

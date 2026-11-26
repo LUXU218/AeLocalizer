@@ -224,12 +224,10 @@ Item {
             }
         }
 
-        Rectangle {
+        Surface {
             id: workspace
             Layout.fillWidth: true
             Layout.fillHeight: true
-            color: Theme.panelFill
-            radius: Theme.radiusCard
 
             ColumnLayout {
                 anchors.fill: parent

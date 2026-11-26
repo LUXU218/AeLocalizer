@@ -12,11 +12,9 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
-import urllib.parse
 
 from PySide6.QtCore import Property, QTimer, QUrl, Signal, Slot
 from core import updater as _updater
@@ -290,11 +288,11 @@ class SettingsUiMixin:
         """设置背景图。接受 file:/// URL 或本地路径；复制进数据目录
         （源文件之后被移动/删除也不失效），旧图清理。不合法就 toast 拒绝。"""
         path = str(src or "").strip()
-        if path.startswith("file:///"):
-            path = path[len("file:///"):]
-        path = os.path.normpath(urllib.parse.unquote(path))
+        if path.lower().startswith("file:"):
+            path = QUrl(path).toLocalFile()
         if not path:
             return
+        path = os.path.normpath(path)
         ext = os.path.splitext(path)[1].lower()
         if ext not in self._BG_EXTS:
             self.toast.emit("error", "不支持的图片格式（%s）—— 用 png / jpg / webp / bmp" % (ext or "无扩展名"))
@@ -306,27 +304,14 @@ class SettingsUiMixin:
             if os.path.getsize(path) > self._BG_MAX_BYTES:
                 self.toast.emit("error", "图片超过 30MB，换张小点的")
                 return
-            bg_dir = os.path.join(_data_root(), "ui_bg")
-            os.makedirs(bg_dir, exist_ok=True)
-            for old in os.listdir(bg_dir):
-                try:
-                    os.unlink(os.path.join(bg_dir, old))
-                except OSError:
-                    pass
-            dst = os.path.join(bg_dir, "bg" + ext)
-            shutil.copyfile(path, dst)
-        except Exception as exc:
-            self.toast.emit("error", "背景图保存失败：%s" % exc)
+        except OSError as exc:
+            self.toast.emit("error", "背景图读取失败：%s" % exc)
             return
-        self._bgImage = dst
-        self._saveUiSettings()
-        self.bgChanged.emit()
+        self._setMediaBackground(path, "image", "")
 
     @Slot()
     def clearBgImage(self):
-        self._bgImage = ""
-        self._saveUiSettings()
-        self.bgChanged.emit()
+        self.clearWallpaperBackground()
 
     @Property(float, notify=bgChanged)  # ★ PySide 类型名是 float（写 real 会 NameError）
     def bgDim(self):

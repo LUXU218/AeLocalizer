@@ -8,10 +8,11 @@ Rectangle {
     property bool filled: false
     property bool pulse: false
 
-    implicitWidth: row.implicitWidth
-    implicitHeight: 18
-    color: "transparent"
-    border.width: 0
+    implicitWidth: row.implicitWidth + 12
+    implicitHeight: Math.max(20, row.implicitHeight + 4)
+    radius: 5
+    color: Qt.rgba(tone.r, tone.g, tone.b, filled ? 0.16 : 0.08)
+    border.color: Qt.rgba(tone.r, tone.g, tone.b, 0.22)
 
     Row {
         id: row
@@ -24,7 +25,7 @@ Rectangle {
             color: badge.tone
 
             SequentialAnimation on scale {
-                running: badge.pulse
+                running: badge.pulse && !Theme.reduceMotion
                 loops: Animation.Infinite
                 NumberAnimation { to: 1.35; duration: 900; easing.type: Easing.InOutQuad }
                 NumberAnimation { to: 1.0; duration: 900; easing.type: Easing.InOutQuad }
@@ -35,7 +36,7 @@ Rectangle {
             text: badge.text
             color: badge.tone
             font.family: Theme.fontFamily
-            font.pixelSize: 11
+            font.pixelSize: Theme.fontSmall
         }
     }
 }

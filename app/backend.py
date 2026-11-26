@@ -1273,6 +1273,22 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
         return self._engine.running
 
     @Property(bool, notify=stateChanged)
+    def engineProfileConfirmed(self):
+        return self._engine.profile_confirmed
+
+    @Property(str, notify=stateChanged)
+    def engineProfileStatus(self):
+        if not self._engine.running:
+            return "引擎未运行"
+        if not self._engine.profile_confirmed:
+            return "已检测引擎，当前配置未确认"
+        return "当前配置引擎已就绪"
+
+    @Property(str, constant=True)
+    def engineProfileDirectory(self):
+        return os.path.join(DATA_ROOT, "engine_dict")
+
+    @Property(bool, notify=stateChanged)
     def guardAvailable(self):
         return self._engine.guard_available
 
@@ -3097,7 +3113,11 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
         note = res.get("note")
         if note:
             self.toast.emit(note[0], note[1])
-        return {"seen": res["seen"], "items": res["items"]}
+        result = {"seen": res["seen"], "items": res["items"]}
+        channels = self._capture_channel_status()
+        if channels:
+            result["channels"] = channels
+        return result
 
     def _nudge_dump(self, gp, wait_s: float = 0.0) -> bool:
         """让守护「立刻」把采集落盘（DUMP_NOW.flag），不再等 60 秒周期。
@@ -3138,7 +3158,39 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
     def captureMissingParamsQuiet(self):
         """自动刷新用：同 captureMissingParams，但不弹 toast（否则每 4 秒一条）。"""
         res = self._capture_missing_core()
-        return {"seen": res["seen"], "items": res["items"]}
+        result = {"seen": res["seen"], "items": res["items"]}
+        channels = self._capture_channel_status()
+        if channels:
+            result["channels"] = channels
+        return result
+
+    def _capture_channel_status(self):
+        """Only report explicit runtime/build evidence, not unseen labels."""
+        status = engine.control_status() or {}
+        if not status.get("control_ready"):
+            return []
+        result = []
+        draw = status.get("draw_stats") or {}
+        if not isinstance(draw, dict):
+            draw = {}
+        profile = draw.get("profile") or {}
+        classic = (isinstance(profile, dict) and bool(profile.get("checkbox_sites"))
+                   and draw.get("pre_hooked") is True and draw.get("post_hooked") is True
+                   and draw.get("call_intact") is True)
+        if draw.get("checkbox_error"):
+            result.append("复选框：专用绘制路径未通过校验")
+        elif draw.get("checkbox_observed") is not True:
+            if not classic and draw.get("checkbox_widget") is not True:
+                result.append("复选框：当前会话尚未验证专用绘制路径")
+            elif draw.get("checkbox_observed") is False:
+                result.append("复选框：专用路径已就绪，本次会话尚未观察到标签")
+            else:
+                result.append("复选框：运行时尚未提供标签观察状态")
+        if status.get("draw_error"):
+            result.append("参数名：引擎诊断未通过")
+        if status.get("popup_error") or getattr(self, "_autoAdaptPopupError", ""):
+            result.append("下拉值：部分绘制或写入路径未通过校验")
+        return result
 
     def _capture_missing_core(self, fresh: bool = False):
         """采集缺词的纯计算部分(无 toast,供补词卡与语料对照共用)。
@@ -3353,7 +3405,43 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
             pass
         items.extend(stuck_items)  # 排尾(junk 前):词典有但 AE 未生效 —— 重加效果/重启引擎可解
         items.extend(junk_items)   # 排尾不丢弃:新插件的合法同名值仍可手动翻译
+        # Prefer typed paint evidence when available. Do not turn inventory
+        # hints or a label never observed on screen into a failed translation.
+        try:
+            snapshot = self._read_capture_labels(os.path.dirname(path))
+            typed = {}
+            for row in snapshot:
+                if not isinstance(row, dict) or row.get("kind") not in ("param", "checkbox", "enum"):
+                    continue
+                en = _norm_name(row.get("en")) if isinstance(row.get("en"), str) else ""
+                if en and not is_placeholder(en) and not any("\u4e00" <= c <= "\u9fff" for c in en):
+                    key = (en, row["kind"])
+                    typed[key] = typed.get(key, False) or row.get("painted") is True
+            if typed:
+                by_name = {en for en, _ in typed}
+                items = [it for it in items if it["en"] not in by_name or it.get("junk")]
+                for (en, kind), painted in typed.items():
+                    if painted or (kind == "enum" and _is_junk_enum(en)):
+                        continue
+                    rec = resolved.get(en)
+                    has_translation = en not in same_form and (
+                        _eng_has(en) or bool(rec is not None and rec.zh and _norm_name(rec.zh) != en))
+                    items.append({"en": en, "kind": kind, "stuck": bool(has_translation),
+                                  "same": en in same_form, "why": miss_why.get(en, "")})
+        except (OSError, ValueError, TypeError):
+            pass  # Older or restarting runtimes still supply the legacy list.
+        for item in items:
+            if item.get("junk") and item["en"] in fx:
+                item["kind"] = "effect"
+            item["status"] = "not_applied" if item.get("stuck") else ("unconfirmed" if item.get("junk") else "missing")
         return {"seen": len(names), "items": items}
+
+    @staticmethod
+    def _read_capture_labels(out_dir):
+        import json
+        with open(os.path.join(out_dir, "label_diagnostics.json"), encoding="utf-8") as handle:
+            snapshot = json.load(handle)
+        return snapshot.get("rows", []) if isinstance(snapshot, dict) else []
     @Slot()
     def aiFillMissing(self) -> None:
         """补词卡一键 AI 补译(2026-10-29):当前缺词清单直接交给 AI,
@@ -3438,6 +3526,122 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
             self.toast.emit("error", "记入词典失败：%s" % str(exc)[:80])
             return 0
         return n
+
+    def _scoped_popup_file(self):
+        return os.path.join(DATA_ROOT, "engine_dict", "scoped_popup.json")
+
+    def _read_scoped_popup(self):
+        try:
+            with open(self._scoped_popup_file(), encoding="utf-8") as handle:
+                value = json.load(handle)
+        except FileNotFoundError:
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    # Exact identifiers and English menu text observed on guest AE 18.0.1.1.
+    # Never use a menu index, a display name or the current layer to infer these keys.
+    _verified_popup_keys = (
+        ("S_Glow", "S_Glow-0530", "Union"),
+        ("S_Mosaic", "S_Mosaic-0530", "Union"),
+    )
+
+    @Slot(result="QVariantList")
+    def captureEffectOptions(self):
+        return self.effectOptionState(False)["options"]
+
+    @Slot(bool, result="QVariantMap")
+    def effectOptionState(self, include_verified):
+        from core.aelaunch import ae_running
+        try:
+            saved = self._read_scoped_popup()
+        except (OSError, ValueError):
+            return {"options": [], "message": "已保存的专属译名不可读。"}
+        origins = {}
+        message = "没有可读取的菜单采集记录。"
+        gp, _ = engine.find_guard()
+        if gp and (not self._live_auto_allowed() or ae_running()):
+            path = os.path.join(os.path.dirname(gp), "out", "label_diagnostics.json")
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    snapshot = json.load(handle)
+                scopes = snapshot["scopes"]
+                if not isinstance(scopes, list):
+                    raise ValueError("scopes")
+                for row in scopes[:3000]:
+                    if not isinstance(row, dict):
+                        continue
+                    key = tuple(row.get(k) for k in ("effect", "parameter", "en"))
+                    if all(isinstance(v, str) and v and "\x1f" not in v for v in key):
+                        origins[key] = "菜单采集"
+                has_enum = any(isinstance(r, dict) and r.get("kind") == "enum"
+                               for r in snapshot.get("rows", []))
+                if origins:
+                    message = "可选择采集到的效果、参数和下拉项。"
+                elif has_enum:
+                    message = "采集记录中有下拉项，尚无可确认的效果和参数归属。"
+                else:
+                    message = "采集记录中没有可确认的下拉项。"
+            except FileNotFoundError:
+                pass
+            except (OSError, TypeError, ValueError, KeyError):
+                message = "菜单采集记录不可读。"
+        for key in saved:
+            parts = tuple(key.split("\x1f"))
+            if len(parts) == 3 and all(parts):
+                origins.setdefault(parts, "已保存")
+        if include_verified:
+            for key in self._verified_popup_keys:
+                origins.setdefault(key, "已核验预置")
+        options = [{"effect": e, "parameter": p, "en": en,
+                    "label": " / ".join((e, p, en)) + " · " + origin,
+                    "zh": saved.get("\x1f".join((e, p, en)), "")}
+                   for (e, p, en), origin in sorted(origins.items())]
+        return {"options": options, "message": message}
+
+    @Slot(str, str, str, str, result=bool)
+    def saveEffectOption(self, effect, parameter, en, zh):
+        import tempfile
+        source = (effect, parameter, en)
+        zh = zh.strip()
+        if (not all(v and len(v) <= 256 and not any(c in v for c in "\x1f\x00\n\r") for v in source)
+                or len(zh) > 120 or any(c in zh for c in "|\x1f\x00\n\r")):
+            self.toast.emit("warn", "译名不能包含换行或竖线，且最多 120 字。")
+            return False
+        if source not in self._verified_popup_keys and not any(
+                tuple(row[k] for k in ("effect", "parameter", "en")) == source
+                for row in self.captureEffectOptions()):
+            self.toast.emit("warn", "未能确认此选项所属参数；请在 AE 展开该下拉再提取。")
+            return False
+        path = self._scoped_popup_file()
+        temp = None
+        try:
+            data = self._read_scoped_popup()
+            key = "\x1f".join(source)
+            if zh:
+                if len(data) >= 3000 and key not in data:
+                    raise ValueError("覆盖词条已达上限")
+                data[key] = zh
+            else:
+                data.pop(key, None)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8",
+                    dir=os.path.dirname(path), prefix="scoped-popup-", delete=False) as handle:
+                temp = handle.name
+                json.dump(data, handle, ensure_ascii=False)
+            os.replace(temp, path)
+            temp = None
+        except (OSError, ValueError) as exc:
+            self.toast.emit("error", "保存按效果译名失败：" + str(exc)[:80])
+            return False
+        finally:
+            if temp:
+                try:
+                    os.unlink(temp)
+                except OSError:
+                    pass
+        self.toast.emit("info", "已保存到当前配置。菜单显示需在 AE 中核验。" if engine.profile_runtime_confirmed()
+                        else "已保存到当前配置，尚未确认引擎读取。")
+        return True
 
     @Slot("QVariantList", result=str)
     def copyCapturedEnglish(self, ens):

@@ -38,12 +38,12 @@ import time
 
 try:                                    # deployed flat next to guard_uni.py
     from build_profile import (TEXT_LABEL_VERSIONS, BuildMismatch,
-                               draw_candidate, text_draw_profile, popup_draw_profile, popup_menu_profile,
-                               popup_label_profile)
+                               checkbox_draw_candidate, draw_candidate, text_draw_profile, popup_draw_profile, popup_menu_profile,
+                               classic_popup_paint_profile, popup_label_profile, checkbox_widget_profile)
 except ImportError:                     # imported as runtime.param_draw_hook
     from .build_profile import (TEXT_LABEL_VERSIONS, BuildMismatch,
-                                draw_candidate, text_draw_profile, popup_draw_profile, popup_menu_profile,
-                                popup_label_profile)
+                                checkbox_draw_candidate, draw_candidate, text_draw_profile, popup_draw_profile, popup_menu_profile,
+                                classic_popup_paint_profile, popup_label_profile, checkbox_widget_profile)
 
 JS = r"""
 var MAP = __MAP__;
@@ -51,9 +51,12 @@ var WANT = false, ACTIVE = 0, COUNT = 0, WIRE = 0, MAP_SEQ = 0, MAP_ERR = "";
 var CACHE = {}, CACHE_N = 0, PENDING = {};
 var PRE_RVA = __PRE_RVA__, CALL_RVA = __CALL_RVA__, RET_RVA = __RET_RVA__;
 var PRE_HEX = __PRE_BYTES__, CALL_HEX = __CALL_BYTES__, RET_HEX = __RET_HEX__;
-var DRAW_SITES = [{pre_rva: PRE_RVA, call_rva: CALL_RVA, ret_rva: RET_RVA,
+var CHECKBOX_PROFILE = typeof __CHECKBOX_PROFILE__ === 'undefined' ? null : __CHECKBOX_PROFILE__;
+var DRAW_SITES = CHECKBOX_PROFILE ? [] : [{pre_rva: PRE_RVA, call_rva: CALL_RVA, ret_rva: RET_RVA,
                    pre_bytes: PRE_HEX, call_bytes: CALL_HEX, ret_bytes: RET_HEX}];
 if (typeof __EXTRA_SITES__ !== 'undefined') DRAW_SITES = DRAW_SITES.concat(__EXTRA_SITES__);
+var ACTIVE_DRAW_SITES = [];
+var CHECKBOX_ERROR = "";
 var SLOT = __SLOT__;
 var SLOT_OK = 0, SLOT_ERR = 0;
 // <<AELOC_OBSERVE_START>>
@@ -65,6 +68,34 @@ var SLOT_OK = 0, SLOT_ERR = 0;
 var SEEN = {}, SEEN_N = 0, SEEN_REV = 0, SEEN_CAP = 8000;
 var APPLIED = {}, MISS = {}, ENUM = {}, MISS_N = 0, ENUM_N = 0;
 var MISS_CAP = 2000, ENUM_CAP = 5000;
+var DIAG = Object.create(null), DIAG_N = 0;
+var CHECKBOX_OBSERVED = false;
+var SCOPE_OPTIONS = Object.create(null), SCOPE_COUNT = 0;
+function scopedPopupLabel(scope, label) {
+    if (scope && label && label.length <= 120) {
+        var key = scope + '\x1f' + label;
+        if (!SCOPE_OPTIONS[key] && SCOPE_COUNT < 3000) {
+            var keys = scope.split('\x1f');
+            if (keys.length === 2) {
+                SCOPE_OPTIONS[key] = {effect:keys[0], parameter:keys[1], en:label};
+                SCOPE_COUNT++; SEEN_REV++;
+            }
+        }
+        if (Object.prototype.hasOwnProperty.call(MAP, key)) return MAP[key];
+    }
+    return Object.prototype.hasOwnProperty.call(MAP, label) ? MAP[label] : null;
+}
+function noteDiagnostic(kind, label, painted) {
+    if (!label || label.length > 120) return;
+    if (kind === "checkbox") CHECKBOX_OBSERVED = true;
+    var key = kind + ':' + label;
+    var row = DIAG[key];
+    if (!row && DIAG_N < SEEN_CAP) {
+        row = DIAG[key] = {kind:kind, en:label, painted:false};
+        DIAG_N++; SEEN_REV++;
+    }
+    if (row && painted && !row.painted) { row.painted = true; SEEN_REV++; }
+}
 function noteSeen(s) {
     if (!s || s.length > 120 || SEEN_N >= SEEN_CAP) return;
     if (Object.prototype.hasOwnProperty.call(SEEN, s)) return;
@@ -91,6 +122,7 @@ var PRE_ON = false, POST_ON = false;
 // AE 2026+ name labels are dvaui UI_StaticText controls; TEXT carries the
 // derived paint sink + std::wstring offset, or null on classic builds.
 var TEXT = __TEXT__;
+var CHECKBOX_WIDGET = typeof __CHECKBOX_WIDGET__ === "undefined" ? null : __CHECKBOX_WIDGET__;
 var POPUP = typeof __POPUP__ === 'undefined' ? null : __POPUP__;
 var LAYER_POPUP = typeof __LAYER_POPUP__ === 'undefined' ? null : __LAYER_POPUP__;
 var TEXT_SCOPE = {}, SOURCE_ACTIVE = 0, SOURCE_ON = false;
@@ -114,22 +146,33 @@ function hexAt(addr, n) {
         return 'ERR:' + e;
     }
 }
-function checkOriginal() {
-    for (var i = 0; i < DRAW_SITES.length; i++) {
-        var site = DRAW_SITES[i];
-        var pre = hexAt(lib.base.add(site.pre_rva), site.pre_bytes.length / 2);
-        var call = hexAt(lib.base.add(site.call_rva), site.call_bytes.length / 2);
-        var ret = hexAt(lib.base.add(site.ret_rva), site.ret_bytes.length / 2);
-        if (pre !== site.pre_bytes) return 'pre@' + site.pre_rva.toString(16) + ':' + pre;
-        if (call !== site.call_bytes) return 'call@' + site.call_rva.toString(16) + ':' + call;
-        if (ret !== site.ret_bytes) return 'ret@' + site.ret_rva.toString(16) + ':' + ret;
+function verifyDrawSite(site) {
+    if (site.arg6_bytes) {
+        var size = site.arg6_bytes.length / 2;
+        if (hexAt(lib.base.add(site.pre_rva - size), size) !== site.arg6_bytes)
+            throw Error('checkbox text argument store differs');
     }
-    return '';
+    ['pre', 'call', 'ret'].forEach(function (part) {
+        var rva = site[part + '_rva'];
+        var bytes = site[part + '_bytes'];
+        if (hexAt(lib.base.add(rva), bytes.length / 2) !== bytes)
+            throw Error('callsite bytes mismatch ' + part + '@' + rva.toString(16));
+    });
+    if (CHECKBOX_PROFILE) {
+        if (lib.path.toLowerCase() !== CHECKBOX_PROFILE.path.toLowerCase())
+            throw Error('loaded AfterFXLib path differs');
+        var drawExport = exportAddr(lib, CHECKBOX_PROFILE.draw_export);
+        if (!drawExport) throw Error('checkbox draw export missing');
+        var callAddress = lib.base.add(site.call_rva);
+        if (!callAddress.add(5 + callAddress.add(1).readS32()).equals(drawExport))
+            throw Error('checkbox draw call target differs');
+    }
+}
+function drawCallIntact(site) {
+    return hexAt(lib.base.add(site.call_rva), site.call_bytes.length / 2) === site.call_bytes;
 }
 function callIntact() {
-    return DRAW_SITES.every(function (site) {
-        return hexAt(lib.base.add(site.call_rva), site.call_bytes.length / 2) === site.call_bytes;
-    });
+    return ACTIVE_DRAW_SITES.length > 0 && ACTIVE_DRAW_SITES.every(drawCallIntact);
 }
 function mkWS(s) {
     if (CACHE[s]) return CACHE[s];
@@ -155,7 +198,7 @@ function release(key) {
     delete PENDING[key];
     if (p.counted && ACTIVE > 0) ACTIVE--;
 }
-function onPre(site) {
+function onPre(site, kind) {
     if (!WANT) return;
     try {
         var rsp = this.context.rsp;
@@ -170,6 +213,7 @@ function onPre(site) {
         var trail = text.match(/\s*$/)[0];
         var stripped = text.trim();
         noteSeen(stripped);
+        noteDiagnostic(kind || "param", stripped, false);
         var tr = MAP[stripped];
         if (!tr || !tr.length) return;
         var key = pkey(site, this.threadId, rsp);
@@ -189,6 +233,7 @@ function onPre(site) {
             rec.committed = true;
             COUNT++;
             noteApplied(stripped);
+            noteDiagnostic(kind || "param", stripped, tr !== stripped);
         } catch (e) {
             rec.write_error = String(e);
             send({error: 'write:' + String(e)});
@@ -280,7 +325,7 @@ function sourceLeave(retval) {
     else TEXT_SCOPE[this.threadId] = this.aelocSourcePrevious;
     if (this.aelocSourceCounted) SOURCE_ACTIVE--;
 }
-function paintEnter(args, layout, kind, popupOwner) {
+function paintEnter(args, layout, kind, popupOwner, reader) {
     if (!WANT || !layout) return;
     if (kind === 'text' && TEXT_SCOPE[this.threadId] !== true) return;
     if (this.aeloc) {
@@ -299,9 +344,11 @@ function paintEnter(args, layout, kind, popupOwner) {
         if (kind === 'popup') P_HITS++; else T_HITS++;
         var data = (cap <= layout.inline_capacity) ? str : str.readPointer();
         var text = data.readUtf16String(len), key = text.trim();
-        var tr = MAP[key];
-        if (popupOwner && (!tr || !tr.length || !effectPopupPath(menuPath(popupOwner)))) return;
+        var scope = popupOwner ? effectScopeKey(menuPath(popupOwner, reader)) : "";
+        if (popupOwner && !scope) return;
+        var tr = kind === "popup" ? scopedPopupLabel(scope, key) : MAP[key];
         noteSeen(key);
+        noteDiagnostic(kind === "popup" ? "enum" : kind === "checkbox" ? "checkbox" : "param", key, false);
         if (kind === 'popup') noteEnum(key);
         if (!tr || !tr.length) return;
         var out = text.match(/^\s*/)[0] + tr + text.match(/\s*$/)[0];
@@ -318,6 +365,7 @@ function paintEnter(args, layout, kind, popupOwner) {
         this.aeloc.headerWritten = true;
         if (kind === 'popup') P_REPLACED++; else T_REPLACED++;
         noteApplied(key);
+        noteDiagnostic(kind === "popup" ? "enum" : kind === "checkbox" ? "checkbox" : "param", key, tr !== key);
     } catch (e) {
         if (kind === 'popup') P_ERR++; else T_ERR++;
         T_LAST = String(e);
@@ -326,6 +374,150 @@ function paintEnter(args, layout, kind, popupOwner) {
     }
 }
 function textEnter(args) { paintEnter.call(this, args, TEXT, 'text'); }
+var CHECKBOX_WIDGET_SCOPE = Object.create(null), CHECKBOX_WIDGET_ON = false;
+function setupCheckboxWidget() {
+    var p = CHECKBOX_WIDGET;
+    if (!p) return;
+    var listeners = [];
+    try {
+        var ui = findModule(['dvaui.dll']), addrs = {};
+        if (!ui || ui.path.toLowerCase() !== p.path.toLowerCase()) return;
+        Object.keys(p.symbols).forEach(function(k) {
+            var s = p.symbols[k], addr = exportAddr(ui, s.name);
+            if (!addr || hexAt(addr, s.bytes.length / 2) !== s.bytes)
+                throw Error('checkbox symbol changed: ' + k);
+            addrs[k] = addr;
+        });
+        var caller = addrs.wrapper.add(p.return_offset);
+        var parent = new NativeFunction(addrs.parent, 'pointer', ['pointer']);
+        listeners.push(Interceptor.attach(addrs.wrapper, {
+            onEnter: function(args) {
+                var tid = this.threadId;
+                this.checkboxPrevious = CHECKBOX_WIDGET_SCOPE[tid];
+                CHECKBOX_WIDGET_SCOPE[tid] = false;
+                SOURCE_ACTIVE++;
+                if (!WANT) return;
+                try {
+                    var child = menuType(args[0]);
+                    var off = child.offsets['.?AVUI_Node@ui@dvaui@@'];
+                    if (child.name !== '.?AVUI_Checkbox@controls@dvaui@@' || typeof off !== 'number') return;
+                    var owner = parent(child.complete.add(off));
+                    if (owner.isNull()) return;
+                    var type = menuType(owner);
+                    if (type.name === '.?AVCECCheckBoxV2@internal@ecp@@'
+                            && inLabelModule(owner.readPointer(), Process.pointerSize))
+                        CHECKBOX_WIDGET_SCOPE[tid] = true;
+                } catch (e) { /* No verified owner: leave native labels untouched. */ }
+            },
+            onLeave: function() {
+                if (typeof this.checkboxPrevious === 'undefined') delete CHECKBOX_WIDGET_SCOPE[this.threadId];
+                else CHECKBOX_WIDGET_SCOPE[this.threadId] = this.checkboxPrevious;
+                SOURCE_ACTIVE--;
+            }
+        }));
+        listeners.push(Interceptor.attach(addrs.draw, {
+            onEnter: function(args) {
+                if (CHECKBOX_WIDGET_SCOPE[this.threadId] === true && this.returnAddress.equals(caller))
+                    paintEnter.call(this, args, p, 'checkbox');
+            },
+            onLeave: textLeave
+        }));
+        CHECKBOX_WIDGET_ON = true;
+    } catch (e) {
+        listeners.forEach(function(l) { l.detach(); });
+        T_LAST = 'checkbox-widget:' + String(e);
+    }
+}
+
+function setupClassicCheckboxScope(scope, listeners) {
+    var entry = lib.base.add(scope.entry_rva);
+    var table = lib.base.add(scope.vtable_rva);
+    var ownerByThread = Object.create(null);
+    var captionByThread = Object.create(null);
+    var callers = Object.create(null);
+    if (hexAt(entry, scope.entry_bytes.length / 2) !== scope.entry_bytes)
+        throw Error('checkbox caption helper changed');
+    scope.calls.forEach(function (call) {
+        var addr = lib.base.add(call.rva);
+        if (hexAt(addr, call.bytes.length / 2) !== call.bytes
+                || !addr.add(5 + addr.add(1).readS32()).equals(entry))
+            throw Error('checkbox caption caller changed');
+        callers[addr.add(5).toString()] = call.owner_rva;
+    });
+    scope.owners.forEach(function (owner) {
+        var addr = lib.base.add(owner.rva);
+        if (hexAt(addr, owner.bytes.length / 2) !== owner.bytes)
+            throw Error('checkbox control method changed');
+        listeners.push(Interceptor.attach(addr, {
+            onEnter: function (args) {
+                this.previousOwner = ownerByThread[this.threadId];
+                ownerByThread[this.threadId] = null;
+                try {
+                    if (args[0].readPointer().equals(table))
+                        ownerByThread[this.threadId] = owner.rva;
+                } catch (e) { /* The instance could not be verified. */ }
+            },
+            onLeave: function () {
+                if (this.previousOwner === undefined) delete ownerByThread[this.threadId];
+                else ownerByThread[this.threadId] = this.previousOwner;
+            }
+        }));
+    });
+    listeners.push(Interceptor.attach(entry, {
+        onEnter: function () {
+            this.previousCaption = captionByThread[this.threadId];
+            var owner = callers[this.returnAddress.toString()];
+            captionByThread[this.threadId] = owner !== undefined && ownerByThread[this.threadId] === owner;
+        },
+        onLeave: function () {
+            if (this.previousCaption === undefined) delete captionByThread[this.threadId];
+            else captionByThread[this.threadId] = this.previousCaption;
+        }
+    }));
+    return captionByThread;
+}
+
+function attachDrawProbes(site, captions, listeners) {
+    // A function callback creates a ProbeListener with no return trap.
+    // Both addresses are inside the native function.
+    listeners.push(Interceptor.attach(lib.base.add(site.pre_rva), function () {
+        if (!captions || captions[this.threadId])
+            onPre.call(this, site.call_rva, site.kind);
+    }));
+    listeners.push(Interceptor.attach(lib.base.add(site.ret_rva), function () {
+        onPost.call(this, site.call_rva);
+    }));
+}
+
+function installDrawSites() {
+    var required = DRAW_SITES.filter(function (site) { return site.kind !== 'checkbox'; });
+    required.forEach(verifyDrawSite);
+    required.forEach(function (site) {
+        attachDrawProbes(site, null, []);
+        ACTIVE_DRAW_SITES.push(site);
+    });
+    DRAW_SITES.filter(function (site) { return site.kind === 'checkbox'; }).forEach(function (site) {
+        var listeners = [];
+        try {
+            verifyDrawSite(site);
+            if (!site.checkbox_scope) throw Error('checkbox caption scope missing');
+            var captions = setupClassicCheckboxScope(site.checkbox_scope, listeners);
+            attachDrawProbes(site, captions, listeners);
+            if (!drawCallIntact(site) || !ACTIVE_DRAW_SITES.every(drawCallIntact))
+                throw Error('checkbox hooks overlap a draw call');
+            ACTIVE_DRAW_SITES.push(site);
+        } catch (e) {
+            CHECKBOX_ERROR = String(e);
+            // If rollback itself fails, let the outer transaction clean up
+            // every listener. Ready must never include a partial install.
+            while (listeners.length) listeners.pop().detach();
+            Interceptor.flush();
+            if (CHECKBOX_PROFILE) throw e;
+        }
+    });
+    if (!callIntact()) throw Error('draw calls unavailable or changed');
+}
+
 function popupSourceEnter(args, caller) {
     var tid = this.threadId;
     this.popupSourcePrevious = POPUP_SOURCES[tid];
@@ -344,6 +536,14 @@ function popupSourceLeave() {
     SOURCE_ACTIVE--;
 }
 function popupEnter(args) {
+    if (POPUP && POPUP.classic) {
+        if (CLASSIC_RETURN && this.returnAddress.equals(CLASSIC_RETURN)) {
+            var classicOwner = CLASSIC_SOURCES[this.threadId];
+            if (classicOwner) paintEnter.call(this, args, POPUP, 'popup', classicOwner, CLASSIC_READER);
+            return;
+        }
+        if (!POPUP.menu) return;
+    }
     if (POPUP && POPUP.paint_sources) {
         var source = POPUP_SOURCES[this.threadId];
         if (!WANT || !source || !this.returnAddress.equals(source.caller)) return;
@@ -420,16 +620,22 @@ function readPopupPath(path, reader) {
     for (var i = 0; i < count; i++) names.push(reader.name(reader.match(reader.component(path, i))).readUtf8String());
     return names;
 }
-function menuPath(owner){
+function menuPath(owner, reader){
+    reader = reader || menuFns;
     var out=Memory.alloc(32),made=false;
     try{
-        menuFns.path(owner,out);made=true;
-        return readPopupPath(out, menuFns);
-    }finally{if(made)menuFns.dtor(out);}
+        reader.path(owner,out);made=true;
+        return readPopupPath(out, reader);
+    }finally{if(made)reader.dtor(out);}
 }
 function effectPopupPath(names){
     var parade=names.lastIndexOf('ADBE Effect Parade');
     return parade>=0 && parade<=names.length-3 && !!names[parade+1] && !!names[names.length-1];
+}
+function effectScopeKey(names) {
+    if (!effectPopupPath(names)) return "";
+    var index = names.lastIndexOf('ADBE Effect Parade');
+    return names[index+1] + '\x1f' + names[names.length-1];
 }
 function menuContext(widget){
     var owner=menuOwner(widget);if(!owner)return null;
@@ -447,7 +653,7 @@ function menuContext(widget){
     var labels=[];for(var i=0;i<bytes/stride;i++)labels.push(menuWS(begin.add(i*stride)));
     var tuple=labels.join('|');
     if(candidates && candidates.indexOf(tuple)<0)return null;
-    return {labels:labels, key:key, widget:widget, begin:begin, end:end};
+    return {labels:labels, key:key, scope:effectScopeKey(names), widget:widget, begin:begin, end:end};
 }
 function menuBuildEnter(args){
     MENU_ACTIVE++;
@@ -483,10 +689,10 @@ function menuAppendEnter(args){
         var label=(c<=15?obj:obj.readPointer()).readUtf8String(n);
         var context=stack[stack.length-1],id=args[3].toUInt32();
         if(id<1 || id>context.labels.length || context.labels[id-1]!==label)return;
-        noteSeen(label.trim());noteEnum(label.trim());
-        var translated=MAP[label.trim()];if(!translated || translated===label)return;
+        noteSeen(label.trim());noteEnum(label.trim());noteDiagnostic("enum",label.trim(),false);
+        var translated=scopedPopupLabel(context.scope,label.trim());if(!translated || translated===label)return;
         this.menuLabel=menuUtf8String(translated);
-        args[2]=this.menuLabel.obj;MENU_HITS++;noteApplied(label.trim());
+        args[2]=this.menuLabel.obj;MENU_HITS++;noteApplied(label.trim());noteDiagnostic("enum",label.trim(),true);
     }catch(e){MENU_ERR++;MENU_LAST=String(e);}
 }
 function menuAppendLeave(){this.menuLabel=null;}
@@ -511,10 +717,11 @@ function menuOsAppendEnter(args){
     var stack=MENU_SCOPE[String(this.threadId)];
     if(!stack || !stack.length || !stack[stack.length-1] || !this.returnAddress.equals(osMenuReturn))return;
     try{
-        var label=osMenuOriginal(stack[stack.length-1],args[1]);if(label===null)return;
-        noteSeen(label.trim());noteEnum(label.trim());
-        var translated=MAP[label.trim()];if(!translated || translated===label)return;
-        this.menuLabel=mkWS(translated);args[1]=this.menuLabel.obj;MENU_HITS++;noteApplied(label.trim());
+        var context=stack[stack.length-1];
+        var label=osMenuOriginal(context,args[1]);if(label===null)return;
+        noteSeen(label.trim());noteEnum(label.trim());noteDiagnostic("enum",label.trim(),false);
+        var translated=scopedPopupLabel(context.osCurrent.scope,label.trim());if(!translated || translated===label)return;
+        this.menuLabel=mkWS(translated);args[1]=this.menuLabel.obj;MENU_HITS++;noteApplied(label.trim());noteDiagnostic("enum",label.trim(),true);
     }catch(e){MENU_ERR++;MENU_LAST=String(e);}
 }
 function menuFlyoutItemEnter(args){
@@ -527,7 +734,7 @@ function menuFlyoutItemEnter(args){
         var label=osMenuOriginal(outer,args[2]);if(label===null)return;
         var index=args[2].sub(outer.osCurrent.begin).toInt32()/POPUP.menu.descriptor_stride;
         if(args[3].toUInt32()!==index)return;
-        frames[frames.length-1]={label:label,index:index};
+        frames[frames.length-1]={label:label,index:index,scope:outer.osCurrent.scope};
     }catch(e){MENU_ERR++;MENU_LAST=String(e);}
 }
 function menuFlyoutItemLeave(){
@@ -544,9 +751,9 @@ function menuFlyoutCtorEnter(args){
         if(n<1 || n>4096 || c<n || c>65536)return;
         var label=(c<=15?obj:obj.readPointer()).readUtf8String(n);
         if(label!==frame.label)return;
-        noteSeen(label.trim());noteEnum(label.trim());
-        var translated=MAP[label.trim()];if(!translated || translated===label)return;
-        this.menuLabel=menuUtf8String(translated);args[2]=this.menuLabel.obj;MENU_HITS++;noteApplied(label.trim());
+        noteSeen(label.trim());noteEnum(label.trim());noteDiagnostic("enum",label.trim(),false);
+        var translated=scopedPopupLabel(frame.scope,label.trim());if(!translated || translated===label)return;
+        this.menuLabel=menuUtf8String(translated);args[2]=this.menuLabel.obj;MENU_HITS++;noteApplied(label.trim());noteDiagnostic("enum",label.trim(),true);
     }catch(e){MENU_ERR++;MENU_LAST=String(e);}
 }
 function setupPopupMenu(listen){
@@ -583,6 +790,42 @@ function setupPopupMenu(listen){
     MENU_ON=true;
 }
 
+var CLASSIC_SOURCES = {}, CLASSIC_RETURN = null, CLASSIC_READER = null;
+function setupClassicPopup(mod, listen) {
+    var profile = POPUP.classic;
+    var call = lib.base.add(profile.call_rva), ret = call.add(6);
+    var draw = exportAddr(mod, profile.draw);
+    if (!draw || hexAt(call, 6) !== profile.call_bytes || !ret.add(call.add(2).readS32()).readPointer().equals(draw))
+        throw Error('classic popup draw call changed');
+    var ownerDraw = verifiedPopupExport(lib, profile.owner);
+    var path = verifiedPopupExport(lib, profile.path);
+    var ownerTable = lib.base.add(profile.owner_vtable);
+    CLASSIC_READER = popupPathReader(profile.helpers);
+    CLASSIC_READER.path = new NativeFunction(path, 'pointer', ['pointer', 'pointer']);
+    listen(ownerDraw, {
+        onEnter: function (args) {
+            var tid = this.threadId;
+            this.previousClassic = CLASSIC_SOURCES[tid];
+            CLASSIC_SOURCES[tid] = null;
+            if (!WANT) return;
+            try {
+                if (args[0].readPointer().equals(ownerTable)) {
+                    CLASSIC_SOURCES[tid] = args[0];
+                    this.countedClassic = true;
+                    SOURCE_ACTIVE++;
+                }
+            } catch (e) { P_ERR++; T_LAST = 'classic-owner:' + String(e); }
+        },
+        onLeave: function () {
+            var tid = this.threadId;
+            if (typeof this.previousClassic === 'undefined') delete CLASSIC_SOURCES[tid];
+            else CLASSIC_SOURCES[tid] = this.previousClassic;
+            if (this.countedClassic) SOURCE_ACTIVE--;
+        }
+    });
+    CLASSIC_RETURN = ret;
+}
+
 function setupPopup() {
     var listeners = [];
     function listen(address, callbacks) { listeners.push(Interceptor.attach(address, callbacks)); }
@@ -590,6 +833,10 @@ function setupPopup() {
         var mod = findModule([POPUP.module || 'dvaui.dll']);
         if (!mod) throw Error('popup paint module missing');
         setupPopupMenu(listen);
+        if (POPUP.classic) {
+            try { setupClassicPopup(mod, listen); }
+            catch (e) { MENU_LAST = 'classic-attach:' + String(e); }
+        }
         (POPUP.paint_sources || []).forEach(function (source) {
             var addr = exportAddr(mod, source.name);
             if (!addr || hexAt(addr, source.bytes.length / 2) !== source.bytes)
@@ -610,6 +857,7 @@ function setupPopup() {
     } catch (e) {
         if (!POPUP.supplemental) throw e;
         listeners.forEach(function (listener) { listener.detach(); });
+        CLASSIC_RETURN = null;
         MENU_ON = false;
         POPUP_ON = false;
         MENU_LAST = 'attach:' + String(e);
@@ -625,7 +873,10 @@ function layerPopupEnter(args) {
     if (!WANT) return;
     try {
         var path = args[LAYER_POPUP.path_arg];
-        if (!path.isNull() && effectPopupPath(readPopupPath(path, LAYER_READER))) LAYER_SCOPES[tid] = {};
+        if (!path.isNull()) {
+            var key = effectScopeKey(readPopupPath(path, LAYER_READER));
+            if (key) LAYER_SCOPES[tid] = {key:key};
+        }
     } catch (e) { MENU_ERR++; MENU_LAST = 'layer-popup:' + String(e); }
 }
 function layerPopupLeave() {
@@ -641,17 +892,34 @@ function layerLabelCall(args) {
         var original = menuWS(args[1]);
         var key = original.trim();
         if (!key || key === '(-' || key.length > 256) return;
-        var translated = MAP[key];
+        var translated = scopedPopupLabel(scope.key, key);
+        noteDiagnostic("enum", key, false);
         if (typeof translated !== 'string' || !translated || translated === '(-' || translated === original) return;
         this.layerLabel = mkWS(translated);
         args[1] = this.layerLabel.obj;
         LAYER_HITS++;
         noteEnum(key);
         noteApplied(key);
+        noteDiagnostic("enum", key, true);
     } catch (e) { MENU_ERR++; MENU_LAST = 'layer-label:' + String(e); }
 }
 function layerLabelReturned() {
     this.layerLabel = null;
+}
+function verifiedPopupExport(mod, symbol) {
+    var addr = exportAddr(mod, symbol.name);
+    if (!addr || hexAt(addr, symbol.bytes.length / 2) !== symbol.bytes)
+        throw Error('popup export changed: ' + symbol.name);
+    return addr;
+}
+function popupPathReader(helpers) {
+    var tdb = findModule(['TDB.dll']), reader = {};
+    Object.keys(helpers).forEach(function (key) {
+        var addr = verifiedPopupExport(tdb, helpers[key]);
+        var result = key === 'dtor' ? 'void' : key === 'length' ? 'uint' : 'pointer';
+        reader[key] = new NativeFunction(addr, result, key === 'component' ? ['pointer','uint'] : ['pointer']);
+    });
+    return reader;
 }
 function setupLayerPopup() {
     var p = LAYER_POPUP;
@@ -662,16 +930,9 @@ function setupLayerPopup() {
     var module = Process.findModuleByAddress(target);
     if (!module || ['u.dll', 'dvacore.dll', 'afterfxlib.dll'].indexOf(module.name.toLowerCase()) < 0)
         throw Error('layer popup converter module changed');
-    var tdb = findModule(['TDB.dll']), reader = {};
-    Object.keys(p.helpers).forEach(function (key) {
-        var h = p.helpers[key], addr = exportAddr(tdb, h.name);
-        if (!addr || hexAt(addr, h.bytes.length / 2) !== h.bytes) throw Error('layer popup path reader changed');
-        reader[key] = new NativeFunction(addr, key === 'length' ? 'uint' : 'pointer',
-                                         key === 'component' ? ['pointer','uint'] : ['pointer']);
-    });
     var listeners = [];
     try {
-        LAYER_READER = reader;
+        LAYER_READER = popupPathReader(p.helpers);
         LAYER_RETURN = ret;
         listeners.push(Interceptor.attach(target, {onEnter:layerLabelCall,onLeave:layerLabelReturned}));
         listeners.push(Interceptor.attach(scope, {onEnter:layerPopupEnter,onLeave:layerPopupLeave}));
@@ -733,22 +994,9 @@ function watchPopupActivity(profile) {
 }
 
 try {
-    var bad = checkOriginal();
-    if (bad) throw new Error('callsite bytes mismatch ' + bad);
-    // Use the ProbeListener overload: attach(target, function). On Frida
-    // 16.6.6 the object form {onEnter} still installs a non-NULL on_leave
-    // iface, so gum_interceptor traps the caller return address even though
-    // we omitted JS onLeave. Both targets are mid-function instructions, so
-    // that return trap is invalid and leaks the invocation counter. The
-    // function form creates JSProbeListener with on_leave == NULL; our own
-    // RET_RVA probe performs restoration/drain.
-    DRAW_SITES.forEach(function (site) {
-        Interceptor.attach(lib.base.add(site.pre_rva), function () { onPre.call(this, site.call_rva); });
-        Interceptor.attach(lib.base.add(site.ret_rva), function () { onPost.call(this, site.call_rva); });
-    });
+    installDrawSites();
     PRE_ON = true;
     POST_ON = true;
-    if (!callIntact()) throw new Error('CALL stolen/relocated by interceptor');
     // AE 2026+ name labels: attach the dvaui static-text paint sink. The
     // export name (not an RVA) is resolved against the loaded module, so the
     // same script works for every build listed in the derived profile.
@@ -767,12 +1015,14 @@ try {
         TDRAW_ON = true;
     }
     if (POPUP) setupPopup();
+    setupCheckboxWidget();
     if (LAYER_POPUP) {
         try { setupLayerPopup(); }
         catch (e) { MENU_LAST = 'layer-attach:' + String(e); }
     }
 } catch (e) {
     try { Interceptor.detachAll(); } catch (x) {}
+    ACTIVE_DRAW_SITES = [];
     PRE_ON = false; POST_ON = false; POPUP_ON = false; TDRAW_ON = false;
     send({error: 'attach:' + String(e)});
 }
@@ -791,6 +1041,7 @@ rpc.exports = {
             // A dictionary hot-swap is exactly when the 补词 list must change:
             // keep the 检查 cache, reset what was translated / still missing.
             APPLIED = {}; MISS = {}; MISS_N = 0; SEEN_REV++;
+            Object.keys(DIAG).forEach(function(k) { DIAG[k].painted = false; });
             return true;
         } catch (e) {
             MAP_ERR = String(e);
@@ -820,6 +1071,7 @@ rpc.exports = {
                 text_replaced: T_REPLACED, text_skip_capacity: T_SKIP_CAP,
                 text_skip_invalid: T_SKIP_INVALID, text_err: T_ERR,
                 text_last: T_LAST, text_source_scoped: SOURCE_ON, popup_enabled: POPUP_ON,
+                popup_classic_enabled: POPUP_ON && CLASSIC_RETURN !== null,
                 popup_hits: P_HITS, popup_replaced: P_REPLACED,
                 popup_err: P_ERR, popup_skip_capacity: P_SKIP_CAP, popup_empty: P_EMPTY,
                 popup_display_only: MENU_ON && !POPUP.supplemental,
@@ -827,14 +1079,17 @@ rpc.exports = {
                 layer_menu_enabled: LAYER_ON, layer_menu_replaced: LAYER_HITS,
                 // Revision only: stats() feeds the 1 Hz status.json, so the
                 // observation payload must never ride along (see observe()).
-                seen_rev: SEEN_REV};
+                checkbox_widget: CHECKBOX_WIDGET_ON,
+                checkbox_observed: CHECKBOX_OBSERVED,
+                checkbox_error: CHECKBOX_ERROR,
+            seen_rev: SEEN_REV};
     },
     // Copy-heavy payloads stay out of stats() so the 1 Hz control loop never
     // suffers. The GUI asks for this only when it is about to write the
     // capture file, and gets a stable revision so it can skip unchanged data.
     observe: function () {
         return {rev: SEEN_REV, seen: SEEN, applied: APPLIED,
-                miss: MISS, enum_seen: ENUM};
+                miss: MISS, enum_seen: ENUM, scopes: Object.keys(SCOPE_OPTIONS).map(function(k){return SCOPE_OPTIONS[k];}), diagnostics: Object.keys(DIAG).map(function(k){return DIAG[k];})};
     },
     drain: function () { return Object.keys(PENDING).length + PAINT_ACTIVE + SOURCE_ACTIVE + MENU_ACTIVE; }
 };
@@ -856,12 +1111,13 @@ def observe_js() -> str:
 
 class ParamDrawHook:
     def __init__(self, pid: int, mapping: dict, afterfxlib_path: str,
-                 timeout: float = 5.0, *, adopted=None):
+                 timeout: float = 5.0, *, adopted=None, checkbox_version=""):
         self.pid = int(pid)
         self.mapping = dict(mapping or {})
         self.afterfxlib_path = afterfxlib_path
         self.timeout = timeout
         self.adopted = adopted
+        self.checkbox_version = checkbox_version
         self.session = None
         self.script = None
         self.profile = {}
@@ -914,11 +1170,17 @@ class ParamDrawHook:
                 profile = draw_candidate(self.afterfxlib_path, sha, allow_unknown=True)
                 profile["local_version"] = self.adopted.version
                 profile["verified_build"] = True
+            elif self.checkbox_version:
+                profile = checkbox_draw_candidate(self.afterfxlib_path, sha)
+                profile["local_version"] = self.checkbox_version
             else:
                 profile = draw_candidate(self.afterfxlib_path, sha)
         except BuildMismatch as exc:
             raise RuntimeError("AfterFXLib build not verified: %s" % exc)
         self.profile = profile
+        if self.checkbox_version and not self.adopted:
+            self.popup_profile_error = "full popup profile unavailable for this AE build"
+            return self._attach_agent(profile, None, None)
         # 2026+ Effect Controls labels are drawn by dvaui UI_StaticText, not
         # by EDB_DrawString.
         #
@@ -941,27 +1203,60 @@ class ParamDrawHook:
                 self.text_profile = text_draw_profile(dvaui_path, allow_unknown=True)
             except (BuildMismatch, OSError):
                 self.text_profile = {}
+        checkbox_widget = None
+        if self.text_profile:
+            try:
+                checkbox_widget = checkbox_widget_profile(dvaui_path)
+            except (BuildMismatch, ImportError, OSError):
+                pass
         self.popup_paint_profile = {}
         self.popup_profile_error = ""
+        menu = None
+        classic = None
         try:
             menu = popup_menu_profile(dvaui_path)
-            popup = popup_draw_profile(dvaui_path, allow_unknown=True, scoped=not self.text_profile)
-            popup["menu"] = menu
         except (BuildMismatch, ImportError, OSError) as exc:
             if self.text_profile:
                 self.popup_profile_error = str(exc)[:160]
-        else:
-            self.popup_paint_profile = popup
+        try:
+            classic = classic_popup_paint_profile(self.afterfxlib_path)
+        except (BuildMismatch, ImportError, OSError):
+            # The classic paint hook supplements the independently verified
+            # PopupSession. Its absence must not disable that fallback.
+            pass
+        if menu or classic:
+            try:
+                popup = popup_draw_profile(dvaui_path, allow_unknown=True, scoped=bool(menu and not self.text_profile))
+            except (BuildMismatch, ImportError, OSError) as exc:
+                if self.text_profile and menu:
+                    self.popup_profile_error = str(exc)[:160]
+            else:
+                if menu:
+                    popup["menu"] = menu
+                if classic:
+                    popup["classic"] = classic
+                if not menu:
+                    popup["supplemental"] = True
+                self.popup_paint_profile = popup
+                self.popup_profile_error = ""
         try:
             layer_popup = popup_label_profile(self.afterfxlib_path)
         except (BuildMismatch, ImportError, OSError):
             layer_popup = None
+        return self._attach_agent(profile, checkbox_widget, layer_popup)
+
+    def _attach_agent(self, profile, checkbox_widget, layer_popup):
         import frida
 
+        checkbox_profile = ({k: profile[k] for k in ("path", "draw_export")}
+                            if profile.get("kind") == "afterfxlib_checkbox" else None)
         src = (JS.replace("__MAP__", json.dumps(self.mapping, ensure_ascii=False))
-               .replace("__EXTRA_SITES__", json.dumps(profile.get("additional_sites", [])))
+               .replace("__CHECKBOX_PROFILE__", json.dumps(checkbox_profile))
+               .replace("__EXTRA_SITES__", json.dumps(
+                   [*profile.get("additional_sites", []), *(dict(s, kind="checkbox") for s in profile.get("checkbox_sites", []))]))
                .replace("__POPUP__", json.dumps(self.popup_paint_profile or None, ensure_ascii=False))
                .replace("__LAYER_POPUP__", json.dumps(layer_popup))
+               .replace("__CHECKBOX_WIDGET__", json.dumps(checkbox_widget))
                .replace("__TEXT__",
                         json.dumps(self.text_profile or None,
                                    ensure_ascii=False))
@@ -978,7 +1273,8 @@ class ParamDrawHook:
         try:
             self.script.load()
             if not self.script.exports_sync.ready():
-                raise RuntimeError("pre/post hooks not ready or CALL changed")
+                error = self.stats().get("checkbox_error") if checkbox_profile else ""
+                raise RuntimeError(error or "pre/post hooks not ready or CALL changed")
         except Exception:
             try:
                 self.script.unload()

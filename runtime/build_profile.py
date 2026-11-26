@@ -120,6 +120,8 @@ DVAUI_DRAW_EXPORT = (
     b"PEAVDrawbot@drawbot@3@@Z")
 DVAUI_GETTEXT_PREFIX = (
     b"?GetTextString@DrawStaticTextParameters@controls@dvaui@@")
+DVAUI_POPUP_DRAW = (
+    b"?Draw@UI_Popup@controls@dvaui@@SAXAEBVDrawPopupParameters@23@PEAVDrawbot@drawbot@3@@Z")
 TEXT_LEN_OFFSET = 0x10
 TEXT_CAP_OFFSET = 0x18
 TEXT_INLINE_CAPACITY = 7
@@ -469,13 +471,168 @@ def _verified_topic_panes(image, exports, sites):
     return verified
 
 
-def draw_candidate(path, sha=None, allow_unknown=False):
-    """Derive and verify the EDB_DrawString parameter-label call site.
 
-    Returns a dict with pre/call/ret RVAs and integrity bytes.  Raises
-    BuildMismatch when the binary cannot be proven to match the template.
-    """
-    sha = _require_verified(path, sha, "afterfxlib", allow_unknown)
+def _checkbox_chained_callers(image, functions, methods):
+    """Find secondary x64 function entries linked to the control's vtable methods."""
+    by_start = {row[0]: row for row in functions}
+    parents = {}
+    for first, end, unwind in functions:
+        if not unwind:
+            continue
+        header, _, count, _ = image.read_rva(unwind, 4)
+        if header >> 3 != 4:  # UNW_FLAG_CHAININFO, mutually exclusive with handler flags.
+            continue
+        tail = unwind + 4 + 2 * ((count + 1) & ~1)
+        parent = struct.unpack("<III", image.read_rva(tail, 12))
+        if by_start.get(parent[0]) == parent:
+            parents[first] = parent[0]
+    for first in parents:
+        owner = first
+        for _ in range(8):
+            owner = parents.get(owner)
+            if owner is None:
+                break
+            if owner in methods:
+                yield first, by_start[first][1], owner
+                break
+
+
+def _verified_checkbox_label(image, target, offsets):
+    """Resolve the EDB call reached by the Effect Controls checkbox caption method."""
+    directory, size = image.exception_dir
+    if not directory or not 12 <= size <= 4 * 1024 * 1024 or size % 12:
+        return []
+    try:
+        text, base = image.text()
+        functions = list(struct.iter_unpack("<III", image.read_rva(directory, size)))
+        starts = [start for start, _, _ in functions]
+        tables = _rtti_vt_candidates(image, ".?AVCECCheckBox@@")
+        if len(tables) != 1:
+            return []
+        expected_store = b"\x48\x89\x5c\x24\x28"  # [rsp+0x28] = wstring ref in RBX
+        chained_store = b"\x4c\x89\x74\x24\x28"  # Older caption helper uses R14 for that reference.
+        chained_arguments = [("mov", "r8, rax"), ("mov", "rdx, rdi"), ("mov", "rcx, rsi")]
+        leaves = {}
+        chained_leaves = {}
+        for offset in offsets:
+            call = base + offset
+            found = _find_arg5_store(text, offset)
+            if found is None:
+                continue
+            pre, pattern = found
+            if pre < 5:
+                continue
+            text_store = text[pre - 5:pre]
+            if text_store not in (expected_store, chained_store):
+                continue
+            site = _draw_site(text, base, offset)
+            site["arg6_bytes"] = text_store.hex()
+            pre_rva = site["pre_rva"]
+            i = bisect.bisect_right(starts, call) - 1
+            if i < 0:
+                continue
+            start, end, _ = functions[i]
+            if not start <= pre_rva - 5 < call + 5 < end or end - start > 1024:
+                continue
+            body = _popup_function(image, start)
+            ops = {op.address: op for op in body}
+            if not {pre_rva - 5, pre_rva, call, call + 5} <= ops.keys():
+                continue
+            if (ops[pre_rva - 5].mnemonic != "mov" or ops[call].mnemonic != "call"
+                    or ops[call].op_str != hex(target)):
+                continue
+            if text_store == chained_store:
+                arguments = [(op.mnemonic, op.op_str) for op in body if pre_rva < op.address < call]
+                if ops[pre_rva].mnemonic not in ("movss", "vmovss") or arguments != chained_arguments:
+                    continue
+                cleanup = [op for op in body if op.address >= call + 5][:4]
+                compare = next((j for j, op in enumerate(cleanup) if op.mnemonic != "mov"), None)
+                if (compare not in (1, 2) or len(cleanup) <= compare + 1
+                        or cleanup[compare].mnemonic != "cmp"
+                        or (cleanup[compare].op_str, cleanup[compare + 1].mnemonic) not in (
+                            ("qword ptr [r14 + 0x18], 8", "jb"),
+                            ("qword ptr [r14 + 0x18], 7", "jbe"),
+                        )):
+                    continue
+                # Recheck the full, stack-neutral argument setup in the running module.
+                site["pre_bytes"] = text[pre:offset].hex()
+                chained_leaves.setdefault(start, {})[call] = site
+                continue
+            if (pre + len(pattern) != offset or ops[pre_rva].mnemonic != "vmovss"
+                    or ops[call + 5].mnemonic != "cmp"
+                    or ops[call + 5].op_str != "qword ptr [rbx + 0x18], 7"):
+                continue
+            leaves.setdefault(start, {})[call] = site
+        if not leaves and not chained_leaves:
+            return []
+
+        methods = set()
+        for off in range(0, 0x500, 8):
+            method = image.u64_rva(tables[0] + off) - image.image_base
+            if not base <= method < base + len(text):
+                break
+            i = bisect.bisect_left(starts, method)
+            if i >= len(starts) or starts[i] != method:
+                continue
+            end = functions[i][1]
+            if method < end and end - method <= 4096:
+                methods.add(method)
+
+        def resolve(callers, candidates):
+            matched = {}
+            for first, end, owner in callers:
+                if not first < end <= first + 4096:
+                    continue
+                code = image.read_rva(first, end - first)
+                if not any(first + m.end() + struct.unpack("<i", m[1])[0] in candidates
+                           for m in re.finditer(rb"\xe8(....)", code, re.S)):
+                    continue
+                for op in _popup_function(image, first):
+                    if op.mnemonic == "call" and op.bytes[:1] == b"\xe8":
+                        addr = op.address + op.size + struct.unpack("<i", op.bytes[1:])[0]
+                        if addr in candidates:
+                            matched.setdefault(addr, []).append({
+                                "rva": op.address, "bytes": op.bytes.hex(),
+                                "owner_rva": owner,
+                            })
+            if not matched:
+                return None
+            if len(matched) != 1:
+                return []
+            function, calls = next(iter(matched.items()))
+            # The caller identifies the helper, not one draw inside it.
+            # Check both shapes so a second draw cannot be hidden by order.
+            if len(leaves.get(function, {})) + len(chained_leaves.get(function, {})) != 1:
+                return []
+            site = next(iter(candidates[function].values()))
+            owners = sorted({c["owner_rva"] for c in calls})
+            return [{
+                **site,
+                "checkbox_scope": {
+                    "entry_rva": function,
+                    "entry_bytes": image.read_rva(function, 16).hex(),
+                    "vtable_rva": tables[0],
+                    "owners": [{"rva": owner, "bytes": image.read_rva(owner, 16).hex()}
+                               for owner in owners],
+                    "calls": calls,
+                },
+            }]
+
+        if chained_leaves:
+            callers = _checkbox_chained_callers(image, functions, methods)
+            sites = resolve(callers, chained_leaves)
+            # The inherited vtable methods can also call a generic text helper.
+            # A verified chained caption block takes precedence over that helper.
+            if sites is not None:
+                return sites
+        ordinary_callers = ((method, functions[bisect.bisect_left(starts, method)][1], method)
+                            for method in sorted(methods))
+        return (resolve(ordinary_callers, leaves) or []) if leaves else []
+    except (BuildMismatch, ImportError, struct.error):
+        return []  # Leave the established label and dropdown paths intact.
+
+
+def _edb_draw_calls(path):
     img = PEImage(path)
     exports = img.exports()
     names = [n for n in exports if DRAW_EXPORT in n]
@@ -489,19 +646,28 @@ def draw_candidate(path, sha=None, allow_unknown=False):
     text, text_rva = img.text()
     if not text:
         raise BuildMismatch("empty .text")
-    scored = []
+    offsets = []
     pos = text.find(b"\xe8")
     while pos >= 0:
         if pos + 5 <= len(text):
             rel = struct.unpack_from("<i", text, pos + 1)[0]
             if text_rva + pos + 5 + rel == target:
-                if (pos >= ANCHOR_BEFORE
-                        and pos + ANCHOR_AFTER <= len(text)):
-                    win = text[pos - ANCHOR_BEFORE:pos + ANCHOR_AFTER]
-                    score = difflib.SequenceMatcher(
-                        None, DRAW_ANCHOR, win, autojunk=False).ratio()
-                    scored.append((score, pos))
+                offsets.append(pos)
         pos = text.find(b"\xe8", pos + 1)
+    return img, exports, sig, sig_sha, target, offsets
+
+
+def draw_candidate(path, sha=None, allow_unknown=False):
+    """Derive and verify the EDB_DrawString parameter-label call site."""
+    sha = _require_verified(path, sha, "afterfxlib", allow_unknown)
+    img, exports, sig, sig_sha, target, offsets = _edb_draw_calls(path)
+    text, text_rva = img.text()
+    scored = []
+    for pos in offsets:
+        if pos >= ANCHOR_BEFORE and pos + ANCHOR_AFTER <= len(text):
+            win = text[pos - ANCHOR_BEFORE:pos + ANCHOR_AFTER]
+            score = difflib.SequenceMatcher(None, DRAW_ANCHOR, win, autojunk=False).ratio()
+            scored.append((score, pos))
     if not scored:
         raise BuildMismatch("no direct call EDB_DrawString")
     scored.sort(reverse=True)
@@ -530,14 +696,35 @@ def draw_candidate(path, sha=None, allow_unknown=False):
         "known_version": known_version("afterfxlib", sha),
         "verified_build": bool(known_version("afterfxlib", sha)),
         "signature_sha256": sig_sha,
+        "draw_export": sig.decode("ascii"),
         **site,
         "additional_sites": additional_sites,
+        "checkbox_sites": _verified_checkbox_label(img, target, offsets),
         "draw_family": draw_family,
         "arg_slot": DRAW_ARG_SLOT,
         "arg5_slot": DRAW_ARG5_SLOT,
         "confidence": round(top_score, 3),
         "runner_up": round(runner, 3),
         "callsites": len(scored),
+    }
+
+
+def checkbox_draw_candidate(path, sha):
+    """Verify just the native checkbox sites for an unlisted classic build."""
+    sha = _require_verified(path, sha, "afterfxlib", allow_unknown=True)
+    img, _, sig, sig_sha, target, offsets = _edb_draw_calls(path)
+    sites = _verified_checkbox_label(img, target, offsets)
+    if len(sites) != 1:
+        raise BuildMismatch("native Effect Controls checkbox draw site is not unique")
+    return {
+        "kind": "afterfxlib_checkbox",
+        "path": os.path.abspath(path),
+        "sha256": sha,
+        "signature_sha256": sig_sha,
+        "draw_export": sig.decode("ascii"),
+        "arg_slot": DRAW_ARG_SLOT,
+        "checkbox_sites": sites,
+        **sites[0],
     }
 
 
@@ -620,6 +807,33 @@ def text_draw_profile(path, sha=None, allow_unknown=False):
 
 
 
+def checkbox_widget_profile(path):
+    """Resolve the AE V2 checkbox draw wrapper, ABI and control parent getter."""
+    image = PEImage(path)
+    exports = image.exports()
+    wrapper_name, wrapper = _popup_export(exports, b"?UI_Draw@UI_Checkbox@controls@dvaui@@")
+    draw_name, draw = _popup_export(exports, b"?Draw@UI_Checkbox@controls@dvaui@@")
+    getter_name, getter = _popup_export(exports, b"?GetString@DrawCheckBoxParams@controls@dvaui@@QEBAAEBV?$basic_string@_W")
+    parent_name, parent = _popup_export(exports, b"?UI_GetParentNode@UI_Node@ui@dvaui@@QEBAPEBV")
+    layout = image.read_rva(getter, 8)
+    if layout[:3] != b"\x48\x8d\x81" or layout[7] != 0xc3:
+        raise BuildMismatch("checkbox text getter ABI changed")
+    offset = struct.unpack_from("<i", layout, 3)[0]
+    if not 0x40 <= offset <= 0x400 or offset % 8:
+        raise BuildMismatch("checkbox draw buffer offset is not plausible")
+    body = _popup_function(image, wrapper)
+    index = _popup_call_index(body, draw)
+    call = body[index]
+    return {"path": os.path.abspath(path), "text_offset": offset,
+            "len_offset": TEXT_LEN_OFFSET, "cap_offset": TEXT_CAP_OFFSET,
+            "inline_capacity": TEXT_INLINE_CAPACITY,
+            "return_offset": call.address + call.size - wrapper,
+            "symbols": {key: {"name": n.decode("ascii"), "bytes": image.read_rva(addr, length).hex()}
+                        for key, n, addr, length in (
+                            ("wrapper", wrapper_name, wrapper, 16), ("draw", draw_name, draw, 16),
+                            ("getter", getter_name, getter, 8), ("parent", parent_name, parent, 12))}}
+
+
 def popup_draw_profile(path, sha=None, allow_unknown=False, *, scoped=False):
     """Verified paint-time string of the current dropdown selection.
 
@@ -634,7 +848,7 @@ def popup_draw_profile(path, sha=None, allow_unknown=False, *, scoped=False):
     getters = [n for n in exports if n.startswith(
         b"?GetString@DrawPopupParameters@controls@dvaui@@QEBAAEBV?$basic_string@_W")]
     draws = [
-        b"?Draw@UI_Popup@controls@dvaui@@SAXAEBVDrawPopupParameters@23@PEAVDrawbot@drawbot@3@@Z",
+        DVAUI_POPUP_DRAW,
         b"?Draw@UI_PopupButton@controls@dvaui@@SAXAEBVDrawPopupParameters@23@PEAVDrawbot@drawbot@3@@Z",
     ]
     if len(getters) != 1 or any(n not in exports for n in draws):
@@ -938,6 +1152,94 @@ def _popup_call_index(body, target):
     return calls[0]
 
 
+def _popup_path_helpers(path):
+    tdb = PEImage(os.path.join(os.path.dirname(os.path.abspath(path)), "TDB.dll"))
+    exports = tdb.exports()
+    helpers = {}
+    for key, symbol in (("length", b"?GetLength@TDB_StreamIDPath@@QEBAIXZ"),
+                        ("component", b"?GetComponent@TDB_StreamIDPath@@QEBAAEBVTDB_StreamID@@I@Z"),
+                        ("match", b"?GetMatchName@TDB_StreamID@@QEBAAEBVTDB_MatchName@@XZ"),
+                        ("name", b"?GetName@TDB_MatchName@@QEBAPEBEXZ"),
+                        ("dtor", b"??1TDB_StreamIDPath@@UEAA@XZ")):
+        name, rva = _popup_export(exports, symbol)
+        helpers[key] = {"name": name.decode("ascii"), "bytes": tdb.read_rva(rva, 12).hex()}
+    return helpers
+
+
+def classic_popup_paint_profile(path):
+    """Resolve the classic Effect Controls selected-value draw in the installed binary."""
+    import pefile
+
+    image = PEImage(path)
+    exports = image.exports()
+    owner_name, owner = _popup_export(exports, b"?Draw@CECStream@@UEAAXPEAVDrawbot@drawbot@dvaui@@@Z")
+    path_name, getter = _popup_export(exports, b"?StreamPath@CECStream@@UEAA?AVTDB_StreamIDPath@@XZ")
+    code, base = image.text()
+
+    def virtual_methods(class_name):
+        tables = _rtti_vt_candidates(image, class_name)
+        if len(tables) != 1:
+            raise BuildMismatch("classic popup vtable unavailable or ambiguous")
+        methods = []
+        for offset in range(0, 0x500, 8):
+            method = image.u64_rva(tables[0] + offset) - image.image_base
+            if not base <= method < base + len(code):
+                break
+            methods.append(method)
+        return tables[0], methods
+
+    owner_table, owner_methods = virtual_methods(".?AVCECPopup@@")
+    if owner not in owner_methods:
+        raise BuildMismatch("classic popup no longer uses CECStream::Draw")
+    getter_ops = _popup_function(image, getter)
+    # The Win64 member returns TDB_StreamIDPath in caller storage passed in RDX.
+    # The supported implementations preserve that pointer across native calls.
+    if not any(op.mnemonic == "mov" and op.op_str == reg + ", rdx" for op in getter_ops[:12]
+               for reg in ("rdi", "rsi") if any(ret.mnemonic == "mov" and ret.op_str == "rax, " + reg
+                                                for ret in getter_ops[-12:])):
+        raise BuildMismatch("classic popup path return ABI changed")
+
+    try:
+        with pefile.PE(data=image.raw, fast_load=True) as parsed:
+            parsed.parse_data_directories(directories=[pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_IMPORT"]])
+            slots = [fn.address - image.image_base
+                     for dll in getattr(parsed, "DIRECTORY_ENTRY_IMPORT", ()) if dll.dll.lower() == b"dvaui.dll"
+                     for fn in dll.imports if fn.name == DVAUI_POPUP_DRAW]
+    except pefile.PEFormatError as error:
+        raise BuildMismatch("invalid classic popup import table") from error
+    if len(slots) != 1:
+        raise BuildMismatch("classic popup paint import unavailable or ambiguous")
+
+    directory, size = image.exception_dir
+    functions = list(struct.iter_unpack("<III", image.read_rva(directory, size)))
+    starts = [first for first, _, _ in functions]
+    _, control_methods = virtual_methods(".?AVCPopupControl@@")
+    control_targets = set()
+    for method in set(control_methods).intersection(starts):
+        control_targets.update(int(op.op_str, 16) for op in _popup_function(image, method)
+                               if op.mnemonic == "call" and op.bytes[:1] == b"\xe8")
+    sites = []
+    for hit in re.finditer(rb"\xff\x15(....)", code, re.S):
+        after = base + hit.end()
+        if after + struct.unpack("<i", hit[1])[0] != slots[0]:
+            continue
+        i = bisect.bisect_right(starts, after - 1) - 1
+        if i < 0:
+            continue
+        start, end, _ = functions[i]
+        if after <= end and start in control_targets:
+            sites.extend(op for op in _popup_function(image, start) if op.address + op.size == after
+                         and op.mnemonic == "call" and op.bytes == hit[0])
+    if len(sites) != 1:
+        raise BuildMismatch("classic popup paint callsite unavailable or ambiguous")
+    site = sites[0]
+    return {"owner": {"name": owner_name.decode("ascii"), "bytes": image.read_rva(owner, 16).hex()},
+            "owner_vtable": owner_table,
+            "path": {"name": path_name.decode("ascii"), "bytes": image.read_rva(getter, 32).hex()},
+            "helpers": _popup_path_helpers(path), "draw": DVAUI_POPUP_DRAW.decode("ascii"),
+            "call_rva": site.address, "call_bytes": site.bytes.hex()}
+
+
 def popup_label_profile(path):
     """Locate the CLayer effect-menu label conversion from the actual host code."""
     image = PEImage(path)
@@ -978,17 +1280,8 @@ def popup_label_profile(path):
         raise BuildMismatch("popup label conversion unavailable or ambiguous")
     call = calls[0]
     after = call.address + call.size
-    tdb = PEImage(os.path.join(os.path.dirname(os.path.abspath(path)), "TDB.dll"))
-    tdb_exports = tdb.exports()
-    helpers = {}
-    for key, prefix in (("length", b"?GetLength@TDB_StreamIDPath@@QEBAIXZ"),
-                        ("component", b"?GetComponent@TDB_StreamIDPath@@QEBAAEBVTDB_StreamID@@I@Z"),
-                        ("match", b"?GetMatchName@TDB_StreamID@@QEBAAEBVTDB_MatchName@@XZ"),
-                        ("name", b"?GetName@TDB_MatchName@@QEBAPEBEXZ")):
-        name, rva = _popup_export(tdb_exports, prefix)
-        helpers[key] = {"name": name.decode("ascii"), "bytes": tdb.read_rva(rva, 12).hex()}
     return {"scope_rva": scope, "scope_bytes": image.read_rva(scope, 12).hex(),
-            "path_arg": path_arg, "helpers": helpers,
+            "path_arg": path_arg, "helpers": _popup_path_helpers(path),
             "call_rva": call.address, "call_bytes": call.bytes.hex(),
             "ret_rva": after, "ret_bytes": image.read_rva(after, 8).hex()}
 

@@ -68,6 +68,7 @@ class PopupSession:
         self._blocked_current = set()
         self.baseline = {}
         self.baseline_key = {}
+        self._restore_pending = {}
         self.persist = {}
         self.baseline_path = os.path.join(
             data_root, "guard_runtime", "popup_baseline.json")
@@ -487,6 +488,13 @@ class PopupSession:
         except Exception:
             return False
 
+    @property
+    def needs_restore(self):
+        # Current verified rows can also recover a prior session's original
+        # from the on-disk baseline. The cache alone is not a live owner.
+        return bool(self._restore_pending) or any(
+            rec["raw"] != rec["original"] for rec in self.records)
+
     def apply(self, mode: str, mapping: dict):
         """mode on/off; current typed records; original bytes are capacity proof."""
         p, _flt = self._open()
@@ -508,8 +516,13 @@ class PopupSession:
                     unchanged += 1
                     _why("display-only")
                     continue
+                key = self._rec_key(rec)
                 if mode == "off":
                     target = rec["original"]
+                    if key in self._restore_pending and self._restore_pending[key] != target:
+                        skipped += 1
+                        _why("restore-baseline-changed")
+                        continue
                 else:
                     base = self.baseline.get(rec["pointer"])
                     if rec["raw"] != rec["original"] and not (
@@ -522,14 +535,38 @@ class PopupSession:
                         continue
                     try:
                         parts = rec["original"].decode(self.encoding).split("|")
-                        trans = [part if not part or any("\u3400" <= ch <= "\u9fff" for ch in part)
-                                 else mapping.get(part.strip()) or part for part in parts]
+                        effect = rec.get("effectMatchName")
+                        parameter = rec.get("matchName")
+                        def translate(part):
+                            if not part:
+                                return part
+                            key = part.strip()
+                            if effect and parameter:
+                                scoped = mapping.get("\x1f".join((effect, parameter, key)))
+                                if scoped:
+                                    return scoped
+                            if any("\u3400" <= ch <= "\u9fff" for ch in part):
+                                return part
+                            return mapping.get(key) or part
+                        trans = [translate(part) for part in parts]
                         target = "|".join(trans).encode(self.encoding)
                     except UnicodeError:
                         skipped += 1
                         _why("encoding")
                         continue
                 if target == rec["raw"]:
+                    if mode == "off" and key in self._restore_pending:
+                        # A write can report failure after changing memory.
+                        # The cached raw value alone is not an off receipt.
+                        try:
+                            restored = p.read(rec["pointer"], len(target) + 1) == target + b"\0"
+                        except Exception:
+                            restored = False
+                        if not restored:
+                            skipped += 1
+                            _why("expected-bytes")
+                            continue
+                        self._restore_pending.pop(key)
                     unchanged += 1
                     if mode == "off":
                         _why("off-already")
@@ -547,7 +584,11 @@ class PopupSession:
                         skipped += 1
                         _why("expected-bytes")
                         continue
+                    if mode == "on" and target != rec["original"]:
+                        self._restore_pending.setdefault(key, rec["original"])
                     p.write_exact(rec["pointer"], target + b"\0")
+                    if target == rec["original"]:
+                        self._restore_pending.pop(key, None)
                     rec["raw"] = target
                     try:
                         rec["text"] = target.decode(self.encoding)

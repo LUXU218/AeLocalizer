@@ -51,9 +51,34 @@ class PopupCodecTests(unittest.TestCase):
         session._valid = lambda rec: True
 
         self.assertEqual(session.apply('on', {'Screen': '滤色'})['changed'], 1)
+        self.assertTrue(session.needs_restore)
         self.assertEqual(session.apply('on', {'Screen': '屏幕'})['changed'], 1)
         self.assertEqual(session.apply('on', {})['changed'], 1)
+        self.assertFalse(session.needs_restore)
         self.assertEqual(writes, [raw + b'\0', '滤色|Reflect'.encode() + b'\0',
                                   '屏幕|Reflect'.encode() + b'\0', raw + b'\0'])
+
+    def test_failed_write_keeps_restore_obligation_until_original_is_verified(self):
+        raw = b'Screen|Reflect'
+        session = self.scan('utf8', raw)
+        current = raw + b'\0'
+
+        def commit_then_raise(address, payload):
+            nonlocal current
+            current = payload
+            raise RuntimeError("read-back failed")
+
+        process = SimpleNamespace(read=lambda addr, size: current[:size],
+                                  write_exact=commit_then_raise)
+        session._open = lambda: (process, _flt())
+        session._valid = lambda rec: True
+        self.assertFalse(session.needs_restore)
+        self.assertEqual(session.apply('on', {'Screen': '滤色'})['reasons'], {'write': 1})
+        self.assertTrue(session.needs_restore)
+        self.assertEqual(session.apply('off', {})['reasons'], {'expected-bytes': 1})
+        self.assertTrue(session.needs_restore)
+        current = raw + b'\0'
+        self.assertEqual(session.apply('off', {})['reasons'], {'off-already': 1})
+        self.assertFalse(session.needs_restore)
 
 if __name__=='__main__':unittest.main(verbosity=2)

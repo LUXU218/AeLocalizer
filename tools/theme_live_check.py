@@ -29,7 +29,7 @@ from PySide6.QtQml import QQmlApplicationEngine
 
 OUT = os.path.join(ROOT, "out")
 LIGHT_BG = "#ffffff"    # Theme.bgBase 浅色
-DARK_BG = "#0f131a"     # Theme.bgBase 深色（2026-11-01 色板重调后的值）
+DARK_BG = "#161616"     # Theme.bgBase 深色
 
 
 def main() -> int:
@@ -68,7 +68,7 @@ def main() -> int:
         print("[FAIL] " + msg)
         for line in log:
             print(line)
-        app.quit()
+        app.exit(1)
         return 1
 
     def check_color(tag, expect):

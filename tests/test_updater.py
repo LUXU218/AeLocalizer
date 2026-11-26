@@ -457,6 +457,74 @@ class TestSettingsUiBackend(unittest.TestCase):
         self.assertEqual(self.b.bgImage, "")
         self.assertEqual(_settings.load(self._tmpdir).get("bg_image"), "")
 
+    def test_clear_scene_resets_all_sources_and_preserves_tuning(self):
+        from core import settings
+
+        b = self.b
+        for url, kind in (("http://127.0.0.1/scene", "scene"), ("", "saved-scene")):
+            with self.subTest(kind=kind):
+                with mock.patch.object(b, "_sceneServer") as server:
+                    b._bgSceneDir = self._tmpdir
+                    b._bgWeId = b._bgSceneWeId = "scene-fixture"
+                    b._bgSceneUrl = url
+                    self.assertEqual(b.backgroundKind, kind)
+                    b.clearWallpaperBackground()
+                    server.stop.assert_called_once()
+                config = settings.load(self._tmpdir)
+                for key in ("bg_image", "bg_video", "bg_we_id", "bg_scene_we_id", "bg_scene_dir"):
+                    self.assertEqual(config[key], "")
+                self.assertEqual(b.weTune("scene-fixture"), b._defaultTune())
+                self.assertIn("scene-fixture", b._weTune)
+                self.assertEqual(self.backend_mod.AppBackend().backgroundKind, "none")
+
+    def test_local_image_replaces_scene_only_after_successful_copy(self):
+        from pathlib import Path
+        b = self.b
+        src = Path(self._tmpdir) / "local.png"
+        self._make_png(src)
+        b._bgSceneWeId = b._bgWeId = "previous"
+        b._bgSceneDir = self._tmpdir
+        with mock.patch("app.backend_parts.wallpaper_ui.shutil.copyfile", side_effect=OSError("disk full")):
+            b.setBgImage(str(src))
+        self.assertEqual(b.backgroundKind, "saved-scene")
+        b.setBgImage(str(src))
+        self.assertEqual((b.backgroundKind, b._bgSceneDir, b._bgWeId), ("image", "", ""))
+        self.assertTrue(src.exists())
+        old = b.bgImage
+        b.setBgImage(str(src))
+        self.assertNotEqual(b.bgImage, old)
+        self.assertEqual(Path(b._bgImage).read_bytes(), src.read_bytes())
+        b.clearWallpaperBackground()
+        self.assertEqual(self.backend_mod.AppBackend().backgroundKind, "none")
+
+    def test_clearing_ignores_delayed_extraction_and_conversion(self):
+        from types import SimpleNamespace
+        b = self.b
+        wall = SimpleNamespace(id="delayed", dir=self._tmpdir)
+        for prepare in (b._extractAsync, b._prepareScenePatch):
+            with self.subTest(prepare=prepare.__name__), mock.patch.object(b, "_run") as run:
+                prepare(wall)
+                self.assertEqual(b.backgroundKind, "preparing")
+                done = run.call_args.args[1]
+                b.clearWallpaperBackground()
+                with mock.patch.object(b, "_finish_apply") as apply, mock.patch.object(b, "_applySceneLive") as live:
+                    done({"ok": True, "path": "old.mp4", "kind": "video"})
+                    apply.assert_not_called()
+                    live.assert_not_called()
+                self.assertEqual(b.backgroundKind, "none")
+
+    def test_local_image_supersedes_pending_video(self):
+        from types import SimpleNamespace
+        src = os.path.join(self._tmpdir, "new.png")
+        self._make_png(src)
+        with mock.patch.object(self.b, "_run") as run:
+            self.b._extractAsync(SimpleNamespace(id="old"))
+            self.b.setBgImage(src)
+            run.call_args.args[1]({"ok": True, "path": "stale.mp4", "kind": "video"})
+        self.assertEqual(self.b.backgroundKind, "image")
+        self.assertFalse(self.b.bgVideo)
+        self.b.clearWallpaperBackground()
+
     def test_bg_dim_clamped_and_persisted(self):
         from core import settings as _settings
 

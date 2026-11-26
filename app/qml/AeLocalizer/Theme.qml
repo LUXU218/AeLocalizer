@@ -52,30 +52,30 @@ QtObject {
                                      ? accentPalettes[accentKey]
                                      : accentPalettes["blue"]
 
-    readonly property color bgBase:     dark ? "#0F131A" : "#FFFFFF"
-    readonly property color bgSurface:  dark ? "#151B24" : "#FFFFFF"
-    readonly property color bgElevated: dark ? "#1B2330" : "#FFFFFF"
-    readonly property color bgSide:     dark ? "#151B24" : "#FFFFFF"
-    readonly property color workspaceFill: dark ? "#101621" : "#E8ECF4"
-    readonly property color titlebarFill: hasAnyBg ? chromeFill
-                                          : (dark ? "#19212E" : "#F3F5F9")
-    readonly property color insetFill: hasAnyBg ? bgHover
-                                       : (dark ? "#202A39" : "#EDF0F6")
-    readonly property color popupFill: hasCustomText ? (darkGlass ? "#202938" : "#FFFFFF")
-                                      : bgElevated
-    readonly property color selectionFill: hasAnyBg || accentKey !== "blue" ? accentSoft
-                                            : (dark ? "#28374D" : "#E8EDF7")
-    readonly property color controlStroke: dark ? "#45536A" : "#C7D0DE"
-    readonly property color actionFill: dark ? accent : "#1B2439"
-    readonly property color actionHover: dark ? accentHover : "#303F5C"
-    readonly property color actionText: dark ? "#101621" : "#FFFFFF"
+    // Native equivalents of the coss ui semantic palette (coss.com/ui/docs/styling).
+    readonly property color bgBase:     dark ? "#161616" : "#ffffff"
+    readonly property color bgSurface:  dark ? "#1b1b1b" : "#ffffff"
+    readonly property color bgElevated: dark ? "#242424" : "#ffffff"
+    readonly property color bgSide:     dark ? "#111111" : "#fafafa"
+    readonly property color workspaceFill: bgBase
+    readonly property color titlebarFill: hasAnyBg ? chromeFill : bgSide
+    readonly property color insetFill: hasAnyBg ? cardFill : (dark ? "#262626" : "#f5f5f5")
+    readonly property color popupFill: hasCustomText ? (darkGlass ? "#242424" : "#ffffff") : bgElevated
+    readonly property color selectedControlFill: hasAnyBg ? wallpaperTint(0.50 + 0.38 * plate) : popupFill
+    readonly property color selectionFill: hasAnyBg ? selectedControlFill : accentKey !== "blue" ? accentSoft : (dark ? "#303030" : "#ebebeb")
+    readonly property color controlStroke: dark ? "#454545" : "#d9d9d9"
+    readonly property color actionFill: dark ? "#f5f5f5" : "#262626"
+    readonly property color actionHover: dark ? "#dedede" : "#414141"
+    readonly property color actionText: dark ? "#262626" : "#fafafa"
+    readonly property color focusRing: accentKey !== "blue" ? accent : (dark ? "#a3a3a3" : "#737373")
     readonly property string iconFamily: "Segoe MDL2 Assets"
-    readonly property color bgHover:    darkGlass ? Qt.rgba(1, 1, 1, 0.14)
-                                       : (dark ? "#1E2734" : "#F3F5F8")
-    readonly property color bgActive:   darkGlass ? Qt.rgba(1, 1, 1, 0.22)
-                                       : (dark ? "#243349" : "#EFF4FF")
-    readonly property color border:     dark ? "#2B3543" : "#E6E9EE"
-    readonly property color borderSoft: dark ? "#202834" : "#F0F2F5"
+    readonly property color bgHover:    hasAnyBg ? wallpaperTint(0.30 + 0.40 * plate)
+                                       : (dark ? "#292929" : "#f4f4f4")
+    readonly property color bgActive:   hasAnyBg ? wallpaperTint(0.40 + 0.43 * plate)
+                                       : (dark ? "#333333" : "#ebebeb")
+    readonly property color border:     dark ? "#363636" : "#e4e4e4"
+    readonly property color borderSoft: dark ? "#2b2b2b" : "#ededed"
+    readonly property color panelStroke: hasAnyBg ? "transparent" : border
 
     property color textCustom: "transparent"
     readonly property bool hasCustomText: hasAnyBg && textCustom.a > 0.0
@@ -87,32 +87,26 @@ QtObject {
     readonly property bool darkGlass: hasCustomText && textLum > 0.55
 
     readonly property color textPrimary:   hasCustomText ? textCustom
-                                           : (dark ? "#EAF0F7" : "#111827")
+                                           : (dark ? "#f5f5f5" : "#262626")
     readonly property color textSecondary: hasCustomText
             ? Qt.rgba(textCustom.r, textCustom.g, textCustom.b, 0.80)
-            : (dark ? "#9BA8B9" : "#5D6B7E")
+            : (dark ? "#b4b4b4" : "#626262")
     readonly property color textTertiary: hasCustomText
             ? Qt.rgba(textCustom.r, textCustom.g, textCustom.b, 0.62)
-            : (dark ? "#667386" : "#98A1AE")
+            : (dark ? "#999999" : "#707070")
 
     readonly property color textOnBg: textPrimary
     readonly property color textOnBgSecondary: textSecondary
     readonly property color textOnBgTertiary: textTertiary
 
     // 壁纸模式下，填充浓度跟随玻璃不透明度设置。
-    readonly property color fieldFill: !hasAnyBg ? bgBase
-            : (darkGlass ? Qt.rgba(0.03, 0.04, 0.06, 0.30 + 0.30 * plate)
-                         : Qt.rgba(bgBase.r, bgBase.g, bgBase.b, 0.10 + 0.28 * plate))
-    readonly property color panelFill: !hasAnyBg ? bgSurface
-            : (darkGlass ? Qt.rgba(0.03, 0.04, 0.06, 0.22 + 0.30 * plate)
-                         : Qt.rgba(bgSurface.r, bgSurface.g, bgSurface.b, 0.05 + 0.22 * plate))
-    readonly property real cardAlpha: hasAnyBg ? 0.06 + 0.26 * plate : 0.0
-    readonly property color cardFill: !hasAnyBg ? "transparent"
-            : (darkGlass ? Qt.rgba(0.03, 0.04, 0.06, cardAlpha)
-                         : Qt.rgba(bgSurface.r, bgSurface.g, bgSurface.b, cardAlpha))
-    readonly property color chromeFill: hasAnyBg
-            ? Qt.rgba(0.02, 0.025, 0.04, 0.04 + 0.16 * plate)
-            : bgSide
+    function wallpaperTint(alpha: real): color {
+        return Qt.rgba(popupFill.r, popupFill.g, popupFill.b, alpha)
+    }
+    readonly property color fieldFill: hasAnyBg ? wallpaperTint(0.18 + 0.35 * plate) : bgBase
+    readonly property color panelFill: hasAnyBg ? wallpaperTint(0.22 + 0.48 * plate) : bgSurface
+    readonly property color cardFill: hasAnyBg ? panelFill : "transparent"
+    readonly property color chromeFill: hasAnyBg ? wallpaperTint(0.16 + 0.46 * plate) : bgSide
     property int glassBlur: 0
     readonly property real glassBlurNorm: Math.max(0, Math.min(60, glassBlur)) / 60.0
     readonly property int glassExtraMax: 12
@@ -126,9 +120,9 @@ QtObject {
     readonly property color accent:      dark ? accentPal.dark      : accentPal.light
     readonly property color accentHover: dark ? accentPal.darkHover : accentPal.lightHover
     readonly property color accentSoft:  dark ? accentPal.darkSoft  : accentPal.lightSoft
-    readonly property color success:     dark ? "#3DCE93" : "#16A34A"
-    readonly property color warn:        dark ? "#F5AE31" : "#D97706"
-    readonly property color danger:      dark ? "#F2596E" : "#DC2626"
+    readonly property color success:     dark ? "#6ee7b7" : "#047857"
+    readonly property color warn:        dark ? "#fcd34d" : "#92400e"
+    readonly property color danger:      dark ? "#fca5a5" : "#b91c1c"
 
     property string uiFont: ""
     readonly property string fontDefault: "Microsoft YaHei UI"

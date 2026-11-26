@@ -21,6 +21,7 @@ Rectangle {
         anchors.fill: parent
         radius: card.radius
         color: Theme.hasAnyBg ? Theme.cardFill : Theme.panelFill
+        border.color: Theme.panelStroke
     }
 
     ColumnLayout {

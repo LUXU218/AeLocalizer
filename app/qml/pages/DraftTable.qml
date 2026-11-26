@@ -8,7 +8,7 @@ FocusScope {
     id: table
     property var backend
 
-    readonly property int statusWidth: Math.max(66, Theme.fontSmall * 5 + Theme.spaceSm)
+    readonly property int statusWidth: Math.max(74, Theme.fontSmall * 5 + 14)
     readonly property int rowHeight: Math.max(36, Theme.fontBody + Theme.spaceMd * 2)
     readonly property int cellSpace: Theme.spaceMd
     readonly property int sourceWidth: Math.max(72, Math.round((width - statusWidth - 4 * cellSpace) * 0.44))
@@ -65,7 +65,7 @@ FocusScope {
             Layout.fillWidth: true
 
             TableText {
-                text: "草稿"
+                text: "翻译草稿"
                 font.pixelSize: Theme.fontTitle
                 font.weight: Font.DemiBold
             }
@@ -234,12 +234,61 @@ FocusScope {
                 }
             }
 
-            TableText {
+            Column {
                 anchors.centerIn: parent
+                width: parent.width
                 visible: rows.count === 0
-                text: "开始翻译后，译文会显示在这里"
-                color: Theme.textSecondary
-                font.pixelSize: Theme.fontSmall
+                spacing: Theme.spaceSm
+
+                Item {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    width: 60
+                    height: 49
+                    visible: table.height > 216
+                    Rectangle {
+                        x: 2; y: 5
+                        width: 31; height: 32; radius: 6
+                        rotation: -9
+                        color: Theme.insetFill
+                        border.color: Theme.controlStroke
+                        Text {
+                            anchors.centerIn: parent
+                            text: "A"
+                            font.family: "Segoe UI"
+                            font.pixelSize: 18
+                            color: Theme.textSecondary
+                        }
+                    }
+                    Rectangle {
+                        x: 25; y: 14
+                        width: 32; height: 32; radius: 6
+                        rotation: 5
+                        color: Theme.actionFill
+                        Text {
+                            anchors.centerIn: parent
+                            text: "译"
+                            font.family: Theme.fontFamily
+                            font.pixelSize: 16
+                            color: Theme.actionText
+                        }
+                    }
+                }
+
+                TableText {
+                    width: parent.width
+                    horizontalAlignment: Text.AlignHCenter
+                    text: "还没有翻译草稿"
+                    font.pixelSize: Theme.fontTitle
+                    font.weight: Font.DemiBold
+                }
+                TableText {
+                    width: parent.width
+                    horizontalAlignment: Text.AlignHCenter
+                    text: "勾选插件后，点击「开始翻译」。"
+                    color: Theme.textSecondary
+                    font.pixelSize: Theme.fontSmall
+                    wrapMode: Text.Wrap
+                }
             }
         }
     }

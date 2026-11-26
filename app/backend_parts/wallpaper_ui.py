@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import tempfile
 
 from PySide6.QtCore import Property, QUrl, Signal, Slot
 
@@ -59,6 +60,8 @@ class WallpaperUiMixin:
           这个入口，等用户点进去才算就等于入口一直不出现。
         """
         self._weItems = []          # 缓存的清单（[{id,title,...}]）
+        self._wallpaperGeneration = 0
+        self._wallpaperPreparing = False
         self._weScanned = False
         self._weInstall = ""
         self._weError = ""
@@ -618,6 +621,7 @@ class WallpaperUiMixin:
         # ★ 场景壁纸：**只有一种呈现方式** —— 实时渲染（WebWallGL + QtWebEngine）。
         #   这样壁纸自带的参数才可能热更新；只有"装了 WebEngine 且起得来"时才成立，
         #   否则自动退回提取画面（对用户来说不是选项，是降级）。
+        self._wallpaperGeneration += 1
         if target.kind == "scene":
             live = self._applySceneLive(target)
             if live is not None:
@@ -652,7 +656,7 @@ class WallpaperUiMixin:
             self._finish_apply(res["path"], res["kind"], res.get("preview", False),
                                res.get("title", ""), wid)
 
-        self._run(work, done, _busy_text="正在准备壁纸…")
+        self._runWallpaperJob(work, done, "正在准备壁纸…")
 
     def _applySceneLive(self, w) -> "str | None":
         """把一张场景壁纸切成实时渲染。返回 None 表示"不可用，请走提取画面"。
@@ -697,9 +701,7 @@ class WallpaperUiMixin:
         self._bgSceneUrl = url
         self._bgSceneRev = self._bgSceneRev + 1
         self._restoreTune(w.id)
-        self._saveUiSettings()
-        self.videoBgChanged.emit()
-        self.bgChanged.emit()
+        self._saveBackground()
         self.toast.emit("info", "「%s」实时渲染中 —— 参数改完立刻生效" % w.title[:24])
         return "正在实时渲染「%s」…" % w.title[:24]
 
@@ -734,7 +736,26 @@ class WallpaperUiMixin:
                                 % ((res or {}).get("msg") or "未知"))
                 self._extractAsync(w)
 
-        self._run(work, done, _busy_text="正在转换视频贴图（首次约半分钟）…")
+        self._runWallpaperJob(work, done, "正在转换视频贴图（首次约半分钟）…")
+
+    def _runWallpaperJob(self, work, done, label):
+        generation = self._wallpaperGeneration
+        self._wallpaperPreparing = True
+        self.videoBgChanged.emit()
+
+        def finish(result):
+            if generation != self._wallpaperGeneration:
+                return
+            self._wallpaperPreparing = False
+            try:
+                done(result)
+            finally:
+                self.videoBgChanged.emit()
+
+        def fail(message):
+            finish({"ok": False, "msg": message.splitlines()[0][:200] if message else "准备失败"})
+
+        self._run(work, finish, _busy_text=label, _on_fail=fail, _toast_fail=False)
 
     def _dropSceneLive(self) -> None:
         """停止实时渲染（换成图片/视频/清除背景时都要调）。"""
@@ -747,68 +768,82 @@ class WallpaperUiMixin:
         self._bgSceneDir = ""
         self._bgSceneUrl = ""
 
-    def _finish_apply(self, path: str, kind: str, from_preview: bool,
-                      title: str, we_id: str = "") -> None:
-        """把提取结果落成真正的背景配置。
+    @Property(str, notify=videoBgChanged)
+    def backgroundKind(self):
+        if self._wallpaperPreparing:
+            return "preparing"
+        if self._bgSceneUrl:
+            return "scene"
+        if self._bgSceneDir or self._bgSceneWeId:
+            return "saved-scene"
+        if self._bgVideo:
+            return "video"
+        if self._bgImage:
+            return "library-image" if self._bgWeId else "image"
+        return "none"
 
-        ★ we_id 必须记下来（2026-11-16 修）：以前视频分支把它清成 "",
-          于是壁纸选择器里「使用中」永远不亮 —— 从场景壁纸剥出 mp4 的正是视频分支。
-        """
-        # ★ 提取画面这条路：先关掉可能正在跑的实时渲染
-        self._dropSceneLive()
-        # ★ 换壁纸前，先把当前这套画面参数记到"上一张"名下，切回来能还原
-        self._snapshotTune()
-        if kind == "video":
-            self._bgImage = ""
-            self._bgVideo = path
-            self._bgWeId = we_id
-            self._restoreTune(we_id)
-            self._saveUiSettings()
-            self.videoBgChanged.emit()
-            self.bgChanged.emit()
-            self.toast.emit("info", "背景已设为视频壁纸「%s」（实时播放）" % title[:24])
-            return
-
-        # 图片：复制进 ui_bg（与既有自定义背景同一条路，防源文件移动）
-        try:
-            bg_dir = os.path.join(_data_root(), "ui_bg")
-            os.makedirs(bg_dir, exist_ok=True)
-            ext = os.path.splitext(path)[1].lower() or ".png"
-            dst = os.path.join(bg_dir, "bg" + ext)
-            for old in os.listdir(bg_dir):
-                try:
-                    os.unlink(os.path.join(bg_dir, old))
-                except OSError:
-                    pass
-            shutil.copyfile(path, dst)
-        except Exception as exc:
-            self.toast.emit("error", "背景图保存失败：%s" % str(exc)[:80])
-            return
-        self._bgVideo = ""
-        self._bgImage = dst
-        self._bgWeId = we_id
-        self._restoreTune(we_id)
+    def _saveBackground(self):
         self._saveUiSettings()
         self.videoBgChanged.emit()
         self.bgChanged.emit()
-        if from_preview:
+
+    def _setMediaBackground(self, path, kind, we_id):
+        image = ""
+        if kind != "video":
+            # Alternate managed slots so QML reloads same-format replacements. Stage the copy
+            # first so a locked file or full disk leaves the active background untouched.
+            try:
+                folder = os.path.join(_data_root(), "ui_bg")
+                os.makedirs(folder, exist_ok=True)
+                ext = os.path.splitext(path)[1].lower() or ".png"
+                image = os.path.join(folder, "bg" + ext)
+                if os.path.normcase(image) == os.path.normcase(self._bgImage):
+                    image = os.path.join(folder, "bg-alt" + ext)
+                with tempfile.NamedTemporaryFile(dir=folder, delete=False) as staged:
+                    tmp = staged.name
+                try:
+                    shutil.copyfile(path, tmp)
+                    os.replace(tmp, image)
+                finally:
+                    if os.path.exists(tmp):
+                        os.unlink(tmp)
+            except OSError as exc:
+                self.toast.emit("error", "背景图保存失败：%s" % exc)
+                return False
+        self._wallpaperGeneration += 1
+        self._wallpaperPreparing = False
+        self._snapshotTune()
+        self._dropSceneLive()
+        self._bgVideo = path if kind == "video" else ""
+        self._bgImage = image
+        self._bgWeId = we_id
+        if we_id:
+            self._restoreTune(we_id)
+        self._saveBackground()
+        return True
+
+    def _finish_apply(self, path: str, kind: str, from_preview: bool,
+                      title: str, we_id: str = "") -> None:
+        if not self._setMediaBackground(path, kind, we_id):
+            return
+        if kind == "video":
+            self.toast.emit("info", "已应用视频壁纸「%s」" % title[:24])
+        elif from_preview:
             self.toast.emit("warn", "「%s」的三维场景无法截图，已用封面图代替" % title[:24])
         else:
-            self.toast.emit("info", "背景已设为壁纸「%s」" % title[:24])
+            self.toast.emit("info", "已应用图片壁纸「%s」" % title[:24])
 
     @Slot(result=str)
     def clearWallpaperBackground(self):
-        """清掉视频背景 / 场景实时渲染（图片背景走既有的 clearBgImage）。"""
-        had_scene = bool(self._bgSceneUrl or self._bgSceneDir)
+        self._wallpaperGeneration += 1
+        self._wallpaperPreparing = False
+        self._snapshotTune()
         self._dropSceneLive()
-        if not self._bgVideo and not had_scene:
-            return "当前没有视频背景"
+        self._bgImage = ""
         self._bgVideo = ""
         self._bgWeId = ""
-        self._saveUiSettings()
-        self.videoBgChanged.emit()
-        self.bgChanged.emit()
-        return "已清除视频背景"
+        self._saveBackground()
+        return "已清除壁纸"
 
     # ---------------------------------------------------------- 画面调节
 

@@ -1,56 +1,55 @@
 import QtQuick
 import QtQuick.Layouts
+import QtQuick.Templates as Templates
 import AeLocalizer
 
-RowLayout {
+Rectangle {
     id: seg
     property var options: []
     property string current: ""
-    property color activeColor: Theme.accent
     signal picked(string key)
 
-    spacing: 2
+    implicitWidth: choices.implicitWidth + 6
+    implicitHeight: choices.implicitHeight + 6
+    radius: Theme.radiusControl + 2
+    color: Theme.insetFill
 
-    Repeater {
-        model: seg.options
+    RowLayout {
+        id: choices
+        anchors.centerIn: parent
+        spacing: 2
 
-        delegate: Rectangle {
-            id: chip
-            required property var modelData
-            readonly property bool active: seg.current === modelData.key
+        Repeater {
+            model: seg.options
 
-            implicitWidth: label.implicitWidth + Theme.spaceMd * 2
-            implicitHeight: 28
-            radius: Theme.radiusControl
-            color: active ? Qt.rgba(seg.activeColor.r, seg.activeColor.g, seg.activeColor.b,
-                                    Theme.dark ? 0.22 : 0.12)
-                          : (area.containsMouse ? Theme.bgHover : "transparent")
-            border.width: active ? 1 : 0
-            border.color: seg.activeColor
-
-            Behavior on color { ColorAnimation { duration: Theme.durFast } }
-
-            Text {
-                id: label
-                anchors.centerIn: parent
-                text: chip.modelData.label
-                color: chip.active ? seg.activeColor
-                                   : (area.containsMouse ? Theme.textPrimary : Theme.textSecondary)
-                font.family: Theme.fontFamily
-                font.pixelSize: Theme.fontBody
-                font.weight: chip.active ? Font.DemiBold : Font.Normal
-
-                Behavior on color { ColorAnimation { duration: Theme.durFast } }
-            }
-
-            MouseArea {
-                id: area
-                anchors.fill: parent
+            delegate: Templates.Button {
+                id: chip
+                required property var modelData
+                readonly property bool selected: seg.current === modelData.key
+                text: modelData.label
+                Accessible.role: Accessible.RadioButton
+                Accessible.checked: selected
                 hoverEnabled: true
-                cursorShape: Qt.PointingHandCursor
-                onClicked: {
-                    if (chip.active) return
-                    seg.picked(chip.modelData.key)
+                horizontalPadding: Theme.spaceSm
+                implicitWidth: contentItem.implicitWidth + 2 * horizontalPadding
+                implicitHeight: Math.max(26, contentItem.implicitHeight + 4)
+                onClicked: if (!selected) seg.picked(modelData.key)
+                HoverHandler { cursorShape: Qt.PointingHandCursor }
+
+                contentItem: Text {
+                    text: chip.text
+                    horizontalAlignment: Text.AlignHCenter
+                    verticalAlignment: Text.AlignVCenter
+                    color: chip.selected || chip.hovered ? Theme.textPrimary : Theme.textSecondary
+                    font.family: Theme.fontFamily
+                    font.pixelSize: Theme.fontBody
+                    font.weight: chip.selected ? Font.DemiBold : Font.Normal
+                }
+                background: Rectangle {
+                    radius: Theme.radiusControl - 1
+                    color: chip.selected ? Theme.selectedControlFill : chip.hovered ? Theme.bgHover : "transparent"
+                    border.width: chip.visualFocus ? 2 : chip.selected ? 1 : 0
+                    border.color: chip.visualFocus ? Theme.focusRing : Theme.border
                 }
             }
         }

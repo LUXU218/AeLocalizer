@@ -129,31 +129,13 @@ ColumnLayout {
 
             BodyText {
                 anchors.verticalCenter: parent.verticalCenter
-                text: control.checked ? "已开启" : "已关闭"
+                text: control.checked ? "设置为开" : "设置为关"
                 wrapMode: Text.NoWrap
             }
 
-            Rectangle {
-                width: 36
-                height: 20
-                radius: height / 2
+            SwitchTrack {
                 anchors.verticalCenter: parent.verticalCenter
-                color: control.checked ? Theme.actionFill : Theme.insetFill
-                border.width: control.checked ? 0 : 1
-                border.color: Theme.controlStroke
-
-                Rectangle {
-                    width: 12
-                    height: width
-                    radius: width / 2
-                    anchors.verticalCenter: parent.verticalCenter
-                    x: control.checked ? parent.width - width - 4 : 4
-                    color: control.checked ? Theme.actionText : Theme.textSecondary
-
-                    Behavior on x {
-                        NumberAnimation { duration: Theme.durFast }
-                    }
-                }
+                checked: control.checked
             }
         }
     }
@@ -191,12 +173,12 @@ ColumnLayout {
                                 width: 6
                                 height: 6
                                 radius: 3
-                                color: card.running ? Theme.success : Theme.textTertiary
+                                color: card.backend && card.backend.engineProfileConfirmed ? Theme.success : Theme.textTertiary
                             }
 
                             BodyText {
                                 objectName: "engineRunningStatus"
-                                text: card.running ? "运行中" : "未运行"
+                                text: card.backend ? card.backend.engineProfileStatus : "引擎未运行"
                                 color: Theme.textPrimary
                             }
                         }
@@ -232,6 +214,11 @@ ColumnLayout {
                     onClicked: card.backend.startEngine()
                 }
             }
+        }
+
+        BodyText {
+            Layout.fillWidth: true
+            text: card.backend ? "当前配置目录  " + card.backend.engineProfileDirectory : ""
         }
 
         BodyText {

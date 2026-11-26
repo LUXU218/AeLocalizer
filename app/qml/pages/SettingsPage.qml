@@ -37,31 +37,6 @@ Item {
         { key: "large",  label: "大" }
     ]
 
-    Component.onCompleted: {
-        if (!backend) return
-        Theme.themeMode = backend.uiTheme
-        Theme.bgImage = backend.bgImage
-        Theme.bgDim = backend.bgDim
-        Theme.accentKey = backend.accentKey
-        Theme.density = backend.density
-        Theme.fontScale = backend.fontScale
-        Theme.reduceMotion = backend.reduceMotion
-        Theme.plate = backend.plate
-        syncBgFromBackend()
-    }
-
-    function syncBgFromBackend() {
-        if (!backend) return
-        Theme.bgVideo = backend.bgVideo
-        Theme.bgBlur = backend.bgBlur
-        Theme.bgBrightness = backend.bgBrightness
-        Theme.bgSaturation = backend.bgSaturation
-        Theme.bgContrast = backend.bgContrast
-        Theme.bgFit = backend.bgFit
-        Theme.bgDim = backend.bgDim
-        Theme.plate = backend.plate
-    }
-
     function applyTextColor(v) {
         if (!backend) return
         backend.setTextColor(v)
@@ -82,13 +57,6 @@ Item {
     }
 
     FileDialog {
-        id: bgPicker
-        title: "选择背景图片"
-        nameFilters: ["图片 (*.png *.jpg *.jpeg *.webp *.bmp)", "所有文件 (*)"]
-        onAccepted: if (backend) backend.setBgImage(selectedFile.toString())
-    }
-
-    FileDialog {
         id: exportDialog
         title: "导出词典备份"
         fileMode: FileDialog.SaveFile
@@ -102,11 +70,6 @@ Item {
         onAccepted: if (backend) backend.importPack(selectedFile.toString().replace("file:///", ""))
     }
 
-    WallpaperPicker {
-        id: wallpaperPicker
-        backend: root.backend
-    }
-
     ColorDialog {
         id: textColorDialog
         title: "选择文字颜色"
@@ -118,11 +81,10 @@ Item {
         anchors.fill: parent
         spacing: Theme.spaceMd
 
-        Rectangle {
+        Surface {
             Layout.fillWidth: true
             Layout.preferredHeight: sectionTabs.implicitHeight + Theme.spaceXs * 2
-            radius: Theme.radiusCard
-            color: Theme.panelFill
+            color: Theme.insetFill
 
             RowLayout {
                 id: sectionTabs
@@ -159,10 +121,10 @@ Item {
 
                         background: Rectangle {
                             radius: Theme.radiusControl
-                            color: tab.selected ? Theme.selectionFill
+                            color: tab.selected ? Theme.selectedControlFill
                                    : (tab.hovered ? Theme.bgHover : "transparent")
-                            border.width: tab.visualFocus ? 1 : 0
-                            border.color: Theme.accent
+                            border.width: tab.visualFocus ? 2 : tab.selected ? 1 : 0
+                            border.color: tab.visualFocus ? Theme.focusRing : Theme.border
                         }
                     }
                 }
@@ -177,6 +139,8 @@ Item {
             currentIndex: root.section
 
             SectionedPage {
+
+                WallpaperSettings { backend: root.backend }
 
                 SettingCard {
                     title: "主题与强调色"
@@ -494,273 +458,10 @@ Item {
                     }
                 }
 
-                SettingCard {
-                    title: "背景"
-
-                    SettingRow {
-                        title: "壁纸引擎"
-
-                        Button {
-                            text: root.backend && root.backend.hasVideoBg
-                                  ? "更换壁纸" : "从壁纸引擎选择"
-                            primary: true
-                            enabledButton: root.backend && root.backend.weAvailable
-                            onClicked: wallpaperPicker.open()
-                        }
-                        Button {
-                            text: "清除视频背景"
-                            visible: root.backend && root.backend.hasVideoBg
-                            onClicked: {
-                                if (!root.backend) return
-                                root.backend.clearWallpaperBackground()
-                                Theme.bgVideo = ""
-                            }
-                        }
-                        Item { Layout.fillWidth: true }
-                        Text {
-                            visible: root.backend && !root.backend.weAvailable
-                            text: "未检测到壁纸引擎"
-                            color: Theme.textTertiary
-                            font.family: Theme.fontFamily
-                            font.pixelSize: Theme.fontSmall
-                        }
-                    }
-
-                    Rectangle { Layout.fillWidth: true; height: 1; color: Theme.borderSoft }
-
-                    SettingRow {
-                        title: "图片"
-
-                        Button {
-                            text: root.backend && root.backend.bgImage.length > 0
-                                  ? "更换图片" : "选择图片"
-                            onClicked: bgPicker.open()
-                        }
-                        Button {
-                            text: "清除"
-                            visible: root.backend && root.backend.bgImage.length > 0
-                            onClicked: if (root.backend) root.backend.clearBgImage()
-                        }
-                        Item { Layout.fillWidth: true }
-                        Text {
-                            visible: root.backend && root.backend.bgImage.length === 0
-                                    && (!root.backend || !root.backend.hasVideoBg)
-                            text: "未设置"
-                            color: Theme.textTertiary
-                            font.family: Theme.fontFamily
-                            font.pixelSize: Theme.fontSmall
-                        }
-                        Text {
-                            visible: root.backend && root.backend.hasVideoBg
-                            text: "当前使用视频壁纸"
-                            color: Theme.accent
-                            font.family: Theme.fontFamily
-                            font.pixelSize: Theme.fontSmall
-                        }
-                    }
-
-
-                    SettingRow {
-                        title: "画面风格"
-                        visible: root.backend && Theme.hasAnyBg
-
-                        Segmented {
-                            current: root.backend ? root.backend.currentBgPreset : ""
-                            options: [
-                                { key: "clear",   label: "清晰" },
-                                { key: "soft",    label: "柔和" },
-                                { key: "frosted", label: "磨砂" },
-                                { key: "reading", label: "阅读优先" }
-                            ]
-                            onPicked: function(key) {
-                                if (!root.backend) return
-                                root.backend.applyBgPreset(key)
-                                root.syncBgFromBackend()
-                            }
-                        }
-                        Item { Layout.fillWidth: true }
-                    }
-
-                    SettingRow {
-                        title: "磨砂强度"
-                        visible: root.backend && Theme.hasAnyBg
-
-                        Slider {
-                            Layout.preferredWidth: 180
-                            value: root.backend ? root.backend.bgBlur : 24
-                            min: 0
-                            max: 60
-                            onMoved: function(v) {
-                                if (!root.backend) return
-                                root.backend.setBgBlur(Math.round(v))
-                                Theme.bgBlur = Math.round(v)
-                            }
-                        }
-                        Text {
-                            text: Math.round(root.backend ? root.backend.bgBlur : 24) + ""
-                            color: Theme.textSecondary
-                            font.family: Theme.monoFamily
-                            font.pixelSize: Theme.fontSmall
-                            Layout.preferredWidth: 32
-                        }
-                    }
-
-                    SettingRow {
-                        title: "亮度"
-                        visible: root.backend && Theme.hasAnyBg
-
-                        Slider {
-                            Layout.preferredWidth: 180
-                            value: root.backend ? root.backend.bgBrightness : 100
-                            min: 50
-                            max: 160
-                            onMoved: function(v) {
-                                if (!root.backend) return
-                                root.backend.setBgBrightness(Math.round(v))
-                                Theme.bgBrightness = Math.round(v)
-                            }
-                        }
-                        Text {
-                            text: Math.round(root.backend ? root.backend.bgBrightness : 100) + "%"
-                            color: Theme.textSecondary
-                            font.family: Theme.monoFamily
-                            font.pixelSize: Theme.fontSmall
-                            Layout.preferredWidth: 44
-                        }
-                    }
-
-                    SettingRow {
-                        title: "饱和度"
-                        visible: root.backend && Theme.hasAnyBg
-
-                        Slider {
-                            Layout.preferredWidth: 180
-                            value: root.backend ? root.backend.bgSaturation : 100
-                            min: 0
-                            max: 200
-                            onMoved: function(v) {
-                                if (!root.backend) return
-                                root.backend.setBgSaturation(Math.round(v))
-                                Theme.bgSaturation = Math.round(v)
-                            }
-                        }
-                        Text {
-                            text: Math.round(root.backend ? root.backend.bgSaturation : 100) + "%"
-                            color: Theme.textSecondary
-                            font.family: Theme.monoFamily
-                            font.pixelSize: Theme.fontSmall
-                            Layout.preferredWidth: 44
-                        }
-                    }
-
-                    SettingRow {
-                        title: "纱罩"
-                        visible: root.backend && Theme.hasAnyBg
-
-                        Slider {
-                            Layout.preferredWidth: 180
-                            value: root.backend ? root.backend.bgDim : 0.22
-                            min: 0
-                            max: 0.95
-                            onMoved: function(v) {
-                                if (!root.backend) return
-                                root.backend.setBgDim(v)
-                                Theme.bgDim = v
-                            }
-                        }
-                        Text {
-                            text: Math.round((root.backend ? root.backend.bgDim : 0.22) * 100) + "%"
-                            color: Theme.textSecondary
-                            font.family: Theme.monoFamily
-                            font.pixelSize: Theme.fontSmall
-                            Layout.preferredWidth: 40
-                        }
-                    }
-
-                    SettingRow {
-                        title: "玻璃不透明度"
-                        visible: root.backend && Theme.hasAnyBg
-
-                        Slider {
-                            Layout.preferredWidth: 180
-                            value: root.backend ? root.backend.plate : 0.6
-                            min: 0
-                            max: 1
-                            onMoved: function(v) {
-                                if (!root.backend) return
-                                root.backend.setPlate(v)
-                                Theme.plate = v
-                            }
-                        }
-                        Text {
-                            text: Math.round((root.backend ? root.backend.plate : 0.6) * 100) + "%"
-                            color: Theme.textSecondary
-                            font.family: Theme.monoFamily
-                            font.pixelSize: Theme.fontSmall
-                            Layout.preferredWidth: 40
-                        }
-                    }
-
-                    SettingRow {
-                        title: "面板磨砂"
-                        visible: root.backend && Theme.hasAnyBg && !Theme.bgIsVideo && !Theme.bgIsScene
-
-                        Slider {
-                            Layout.preferredWidth: 180
-                            value: root.backend ? root.backend.glassBlur : 0
-                            min: 0
-                            max: 60
-                            onMoved: function(v) {
-                                if (!root.backend) return
-                                root.backend.setGlassBlur(Math.round(v))
-                                Theme.glassBlur = Math.round(v)
-                            }
-                        }
-                        Text {
-                            text: Math.round(root.backend ? root.backend.glassBlur : 0) + ""
-                            color: Theme.textSecondary
-                            font.family: Theme.monoFamily
-                            font.pixelSize: Theme.fontSmall
-                            Layout.preferredWidth: 32
-                        }
-                    }
-
-                    SettingRow {
-                        title: "填充方式"
-                        visible: root.backend && Theme.hasAnyBg
-
-                        Segmented {
-                            current: root.backend ? root.backend.bgFit : "cover"
-                            options: [
-                                { key: "cover",   label: "铺满裁切" },
-                                { key: "contain", label: "完整显示" }
-                            ]
-                            onPicked: function(key) {
-                                if (!root.backend) return
-                                root.backend.setBgFit(key)
-                                Theme.bgFit = key
-                            }
-                        }
-                        Item { Layout.fillWidth: true }
-                    }
-
-                    RowLayout {
-                        Layout.fillWidth: true
-                        spacing: Theme.spaceSm
-                        Item { Layout.fillWidth: true }
-                        Button {
-                            text: "恢复默认外观"
-                            onClicked: {
-                                if (!root.backend) return
-                                root.backend.resetAppearance()
-                                Theme.accentKey = root.backend.accentKey
-                                Theme.density = root.backend.density
-                                Theme.fontScale = root.backend.fontScale
-                                Theme.reduceMotion = root.backend.reduceMotion
-                                Theme.plate = root.backend.plate
-                            }
-                        }
-                    }
+                Button {
+                    text: "恢复默认外观"
+                    Layout.alignment: Qt.AlignRight
+                    onClicked: if (root.backend) root.backend.resetAppearance()
                 }
             }
 

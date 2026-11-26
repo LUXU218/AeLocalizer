@@ -8,8 +8,12 @@ __pycache__/
 .env.*
 *.pem
 *.key
+*.p12
+*.pfx
 ai_key.dat*
 settings.json
+store.json
+locations.json
 *.log
 *.bak
 *.bak-*
@@ -28,6 +32,7 @@ settings.json
 /_dbg/
 /.acceptance/
 /.test-scratch/
+/.verification/
 /fake_dict_dir/
 /runtime/out/
 /native/utf8fixer/AE_SDK/

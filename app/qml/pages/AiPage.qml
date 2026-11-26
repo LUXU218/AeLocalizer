@@ -11,6 +11,45 @@ Item {
     readonly property real widthScale: Math.max(0, Math.min(1, (width - 700) / 270))
     readonly property int panePadding: Math.round(Theme.spaceMd + (Theme.spaceLg - Theme.spaceMd) * widthScale)
 
+    readonly property Component headerActions: Component {
+        RowLayout {
+            spacing: Theme.spaceSm
+
+            ChoiceBox {
+                objectName: "versionBox"
+                popupName: "versionPop"
+                Layout.preferredWidth: 104 + 16 * page.widthScale
+                Layout.minimumWidth: 92
+                Accessible.name: "After Effects 版本"
+                model: page.backend ? page.backend.versions : []
+                currentIndex: page.backend ? model.indexOf(page.backend.currentVersion) : -1
+                displayText: currentIndex >= 0 ? "AE " + currentText : "选择 AE"
+                onActivated: if (page.backend) page.backend.setVersion(currentText)
+            }
+
+            Button {
+                text: "扫描"
+                symbol: "\uE72C"
+                Layout.preferredHeight: 34
+                enabledButton: page.backend && !page.backend.busy
+                onClicked: page.backend.scan()
+            }
+
+            Button {
+                objectName: "startTranslationButton"
+                text: "开始翻译"
+                symbol: "\uE768"
+                primary: true
+                Layout.preferredHeight: 34
+                enabledButton: page.backend && !page.backend.busy
+                onClicked: {
+                    page.saveApiKey()
+                    page.backend.startTranslate()
+                }
+            }
+        }
+    }
+
     function saveApiKey() {
         const value = apiKey.text.trim()
         if (!backend || !value.length)
@@ -30,13 +69,11 @@ Item {
         anchors.fill: parent
         spacing: Theme.spaceMd
 
-        Rectangle {
+        Surface {
             id: toolbar
             objectName: "translationToolbar"
             Layout.fillWidth: true
             Layout.preferredHeight: controls.implicitHeight + 2 * Theme.spaceSm
-            color: Theme.panelFill
-            radius: Theme.radiusCard
 
             ColumnLayout {
                 id: controls
@@ -46,50 +83,6 @@ Item {
                 anchors.topMargin: Theme.spaceSm
                 anchors.bottomMargin: Theme.spaceSm
                 spacing: Theme.spaceSm
-
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing: Theme.spaceSm
-
-                    ChoiceBox {
-                        objectName: "versionBox"
-                        popupName: "versionPop"
-                        Layout.preferredWidth: 104 + 50 * page.widthScale
-                        Layout.minimumWidth: 92
-                        Accessible.name: "After Effects 版本"
-                        model: page.backend ? page.backend.versions : []
-                        currentIndex: page.backend ? model.indexOf(page.backend.currentVersion) : -1
-                        displayText: currentIndex >= 0 ? "AE " + currentText : "选择 AE"
-                        onActivated: if (page.backend) page.backend.setVersion(currentText)
-                    }
-
-                    Button {
-                        text: "扫描"
-                        Layout.preferredHeight: 34
-                        enabledButton: page.backend && !page.backend.busy
-                        onClicked: page.backend.scan()
-                    }
-
-                    Item { Layout.fillWidth: true }
-
-                    Button {
-                        objectName: "startTranslationButton"
-                        text: "开始翻译"
-                        primary: true
-                        Layout.preferredHeight: 34
-                        enabledButton: page.backend && !page.backend.busy
-                        onClicked: {
-                            page.saveApiKey()
-                            page.backend.startTranslate()
-                        }
-                    }
-                }
-
-                Rectangle {
-                    Layout.fillWidth: true
-                    Layout.preferredHeight: 1
-                    color: Theme.borderSoft
-                }
 
                 RowLayout {
                     Layout.fillWidth: true
@@ -140,9 +133,9 @@ Item {
 
                         background: Rectangle {
                             radius: Theme.radiusControl
-                            color: Theme.insetFill
-                            border.width: apiKey.activeFocus ? 1 : 0
-                            border.color: Theme.accent
+                            color: Theme.fieldFill
+                            border.width: apiKey.activeFocus ? 2 : 1
+                            border.color: apiKey.activeFocus ? Theme.focusRing : Theme.controlStroke
                         }
                     }
 
@@ -231,25 +224,21 @@ Item {
             }
         }
 
-        Rectangle {
+        RowLayout {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            color: Theme.panelFill
-            radius: Theme.radiusCard
+            spacing: Theme.spaceMd
 
-            RowLayout {
-                anchors.fill: parent
-                spacing: 0
-
+            Surface {
+                Layout.preferredWidth: Math.max(164, Math.min(248, page.width * 0.26))
+                Layout.fillHeight: true
                 ColumnLayout {
-                    Layout.preferredWidth: Math.max(176, Math.min(238, page.width * 0.25))
-                    Layout.fillWidth: false
-                    Layout.fillHeight: true
-                    Layout.margins: page.panePadding
-                    spacing: Theme.spaceSm
+                    anchors.fill: parent
+                    anchors.margins: page.panePadding
+                    spacing: Theme.spaceMd
 
                     Text {
-                        text: "插件"
+                        text: "插件列表"
                         color: Theme.textPrimary
                         font.family: Theme.fontFamily
                         font.pixelSize: Theme.fontTitle
@@ -262,58 +251,71 @@ Item {
                         backend: page.backend
                     }
                 }
-
-                Rectangle {
-                    Layout.fillHeight: true
-                    Layout.preferredWidth: 1
-                    color: Theme.borderSoft
-                }
-
-                DraftTable {
-                    id: drafts
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
-                    Layout.margins: page.panePadding
-                    backend: page.backend
-                }
             }
-        }
 
-        RowLayout {
-            Layout.fillWidth: true
-            spacing: Theme.spaceSm
-
-            Text {
+            Surface {
                 Layout.fillWidth: true
-                text: page.backend ? page.backend.aiDraftSummary : ""
-                color: Theme.textOnBgSecondary
-                font.family: Theme.fontFamily
-                font.pixelSize: Theme.fontSmall
-                elide: Text.ElideRight
-            }
+                Layout.fillHeight: true
+                ColumnLayout {
+                    anchors.fill: parent
+                    anchors.margins: 1
+                    spacing: 0
+                    DraftTable {
+                        id: drafts
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        Layout.margins: page.panePadding
+                        backend: page.backend
+                    }
+                    Rectangle {
+                        Layout.fillWidth: true
+                        implicitHeight: 1
+                        color: Theme.borderSoft
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Layout.margins: Theme.spaceSm
+                        Layout.leftMargin: page.panePadding
+                        spacing: Theme.spaceSm
 
-            Button {
-                objectName: "discardDraftButton"
-                text: "丢弃"
-                Layout.minimumWidth: 70
-                Layout.preferredHeight: 34
-                enabledButton: page.backend && page.backend.aiDraftCount > 0
-                onClicked: {
-                    drafts.commitActiveEdit()
-                    page.backend.discardDraft()
-                }
-            }
+                        Text {
+                            Layout.fillWidth: true
+                            text: page.backend ? page.backend.aiDraftSummary : ""
+                            color: Theme.textOnBgSecondary
+                            font.family: Theme.fontFamily
+                            font.pixelSize: Theme.fontSmall
+                            elide: Text.ElideRight
+                            Basic.ToolTip.visible: truncated && summaryHover.hovered
+                            Basic.ToolTip.text: text
+                            HoverHandler { id: summaryHover }
+                        }
 
-            Button {
-                objectName: "acceptDraftButton"
-                text: "全部接受"
-                primary: true
-                Layout.minimumWidth: 96
-                Layout.preferredHeight: 34
-                enabledButton: page.backend && page.backend.aiDraftCount > 0
-                onClicked: {
-                    drafts.commitActiveEdit()
-                    page.backend.acceptDraft()
+                        Button {
+                            objectName: "discardDraftButton"
+                            text: "丢弃"
+                            quiet: true
+                            Layout.minimumWidth: 70
+                            Layout.preferredHeight: 34
+                            enabledButton: page.backend && page.backend.aiDraftCount > 0
+                            onClicked: {
+                                drafts.commitActiveEdit()
+                                page.backend.discardDraft()
+                            }
+                        }
+
+                        Button {
+                            objectName: "acceptDraftButton"
+                            text: "全部接受"
+                            primary: true
+                            Layout.minimumWidth: 96
+                            Layout.preferredHeight: 34
+                            enabledButton: page.backend && page.backend.aiDraftCount > 0
+                            onClicked: {
+                                drafts.commitActiveEdit()
+                                page.backend.acceptDraft()
+                            }
+                        }
+                    }
                 }
             }
         }

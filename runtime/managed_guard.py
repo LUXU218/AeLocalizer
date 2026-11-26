@@ -119,6 +119,8 @@ def _write_capture(out_dir, obs):
         miss = [{"en": k, "why": str(miss_map[k])[:40]}
                 for k in sorted(miss_map)][:2000]
         enum = sorted(obs.get("enum_seen") or {})
+        rows = obs.get("diagnostics") or []
+        scopes = obs.get("scopes") or []
     except Exception as exc:
         _log("capture build failed: %r" % (exc,))
         return False
@@ -126,7 +128,8 @@ def _write_capture(out_dir, obs):
     for name, payload in (("all_param_names.json", names),
                           ("renamed_names.json", applied),
                           ("rename_miss.json", miss),
-                          ("enum_missing.json", enum)):
+                          ("enum_missing.json", enum),
+                          ("label_diagnostics.json", {"rows": rows, "miss": miss, "scopes": scopes})):
         if not _atomic_json(os.path.join(out_dir, name), payload):
             ok = False
     return ok
@@ -385,7 +388,22 @@ class LanguageEngine:
         try:
             enums = dict(obs.get("enum_seen") or {})
             records = getattr(self.popup, "records", None) or []
+            scopes = list(obs.get("scopes") or [])
+            scoped_keys = {(x.get("effect"), x.get("parameter"), x.get("en")) for x in scopes if isinstance(x, dict)}
             for rec in records:
+                effect = str(rec.get("effectMatchName") or "")
+                parameter = str(rec.get("matchName") or "")
+                original = rec.get("original")
+                if effect and parameter and isinstance(original, bytes) and self.popup is not None:
+                    try:
+                        options = original.decode(self.popup.encoding).split("|")
+                    except (UnicodeError, AttributeError):
+                        options = []
+                    for label in options:
+                        key = (effect, parameter, label.strip())
+                        if len(scopes) < 3000 and key[2] and key not in scoped_keys:
+                            scopes.append({"effect": key[0], "parameter": key[1], "en": key[2]})
+                            scoped_keys.add(key)
                 for raw in str(rec.get("text") or "").split("|"):
                     opt = " ".join(raw.split())
                     if not opt or opt in self.mapping:
@@ -394,6 +412,7 @@ class LanguageEngine:
                         continue
                     enums.setdefault(opt, 1)
             obs["enum_seen"] = enums
+            obs["scopes"] = scopes
             # Popup records change without touching the draw revision.
             obs["rev"] = int(obs.get("rev") or 0) + len(records)
         except Exception as exc:
@@ -439,8 +458,15 @@ class LanguageEngine:
                 obj = json.load(f)
             if not isinstance(obj, dict):
                 return {}, "not-dict"
-            return ({str(k): str(v) for k, v in obj.items() if k and v},
-                    "")
+            mapping = {str(k): str(v) for k, v in obj.items() if k and v and "\x1f" not in k}
+            scoped = _read_json(os.path.join(self.engine_dict, "scoped_popup.json"))
+            if isinstance(scoped, dict):
+                for key, value in list(scoped.items())[:3000]:
+                    if (len(key.split("\x1f")) == 3 and all(key.split("\x1f"))
+                            and isinstance(value, str) and 0 < len(value) <= 120
+                            and not any(c in value for c in "|\n\r\x00\x1f")):
+                        mapping[key] = value
+            return mapping, ""
         except Exception as exc:
             return {}, "map-read:%s" % str(exc)[:120]
 
@@ -466,7 +492,7 @@ class LanguageEngine:
         if self.project_root and self.project_root not in sys.path:
             sys.path.insert(0, self.project_root)
         from core.adapter import adapted_runtime_profile
-        from core.proc import Process, module_digest
+        from core.proc import Process, file_version, module_digest
         from build_profile import known_version
 
         with Process(int(pid), False) as p:
@@ -477,8 +503,17 @@ class LanguageEngine:
                 raise RuntimeError("AfterFXLib.dll missing")
             sha = module_digest(p, m["path"])
             if known_version("afterfxlib", sha):
-                return m["path"], None
-            return m["path"], adapted_runtime_profile(p, modules, self.data_root)
+                return m["path"], None, ""
+            adapted = adapted_runtime_profile(p, modules, self.data_root)
+            if adapted is not None:
+                return m["path"], adapted, ""
+            version = file_version(p.image)
+            if (version.partition(".")[0] in ("18", "22", "23", "24")
+                    and os.path.basename(p.image).casefold() == "afterfx.exe"
+                    and os.path.normcase(os.path.dirname(p.image))
+                    == os.path.normcase(os.path.dirname(m["path"]))):
+                return m["path"], None, version
+            return m["path"], None, ""
 
     def attach(self, host):
         from param_draw_hook import ParamDrawHook
@@ -528,8 +563,9 @@ class LanguageEngine:
                 }
             except Exception:
                 pass
-            lib, adapted = self._afterfxlib(pid)
-            new_draw = ParamDrawHook(pid, self.mapping, lib, adopted=adapted)
+            lib, adapted, checkbox_version = self._afterfxlib(pid)
+            new_draw = ParamDrawHook(pid, self.mapping, lib, adopted=adapted,
+                                     checkbox_version=checkbox_version)
             new_draw.attach()
             import hashlib
             ident = hashlib.sha256(ident.encode("utf-8")).hexdigest()
@@ -871,8 +907,8 @@ class LanguageEngine:
             self._set_stop("done", "host-dead-discard")
             return True
         try:
-            if self.popup is not None:
-                # alive host: re-read current tree before restoring.
+            if self.popup is not None and self.popup.needs_restore:
+                # Rescan only when there are native strings to restore.
                 self._set_stop("popup-scan", "begin")
                 try:
                     self.popup.scan()
@@ -904,6 +940,7 @@ class LanguageEngine:
                     self.popup_restore_unknown = True
                     return False
                 self._set_stop("popup-restore", "done")
+            if self.popup is not None:
                 self._set_stop("popup-close", "begin")
                 self.popup.close()
                 self._set_stop("popup-close", "done")
@@ -929,6 +966,10 @@ class LanguageEngine:
                                   json.dumps(st, ensure_ascii=False)[:240]))
                 return False
             self.draw = None
+            # The last painted caption can outlive the hook. Invalidate the
+            # verified AE window after the draw session has drained/unloaded.
+            if self._host_status() == "alive":
+                _redraw_host(int(self.host["pid"]), attempts=1)
         self.host = None
         self._set_stop("done", "safe")
         return True
@@ -1175,7 +1216,7 @@ def main(argv):
     # 上一个守护会话的采集文件必须清掉：补词页一旦读到旧快照，就会把已经
     # 关掉的 AE 见过的词当成当前状态（2026-11-02 用户实测过这个坑）。
     for _stale in ("all_param_names.json", "renamed_names.json",
-                   "rename_miss.json", "enum_missing.json"):
+                   "rename_miss.json", "enum_missing.json", "label_diagnostics.json"):
         try:
             os.remove(os.path.join(OUT, _stale))
         except OSError:
@@ -1406,7 +1447,8 @@ def main(argv):
                         if lang.draw is not None else 0
                 except Exception:
                     rev = 0
-                if forced or rev != last_capture_rev:
+                stamp = (rev, len(getattr(getattr(lang, "popup", None), "records", None) or []))
+                if forced or stamp != last_capture_rev:
                     # 采集只是旁路观测：任何异常都不能把控制循环（以及正在
                     # 生效的语言会话）带崩。
                     try:
@@ -1416,7 +1458,7 @@ def main(argv):
                         _log("capture observe failed: %r" % (_ce,))
                     if obs:
                         _write_capture(OUT, obs)
-                        last_capture_rev = int(obs.get("rev") or rev)
+                        last_capture_rev = stamp
                     last_capture = capm
             popup_activity = lang.popup_activity(state.mode)
             if popup_activity is None:

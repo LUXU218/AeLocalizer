@@ -28,6 +28,21 @@ class HiddenGuardChecksTest(unittest.TestCase):
                     self.assertEqual(run.call_args.kwargs.get("stdin"), engine.subprocess.DEVNULL)
 
 
+class ProfileReceiptTest(unittest.TestCase):
+    def test_profile_needs_fresh_receipt_and_same_live_process(self):
+        valid = dict(protocol="aeloc-managed-guard/1", control_ready=True,
+                     runtime_pid=42, runtime_ctime=123, updated=980)
+        for receipt, expected in [
+            ({}, False), (valid, True), (dict(valid, updated=850), False),
+            (dict(valid, runtime_ctime=122), False),
+            (dict(valid, control_ready=False), False), (dict(valid, updated=1100), False)
+        ]:
+            with self.subTest(receipt=receipt), mock.patch.object(engine, "control_status", return_value=receipt), \
+                    mock.patch.object(engine.time, "time", return_value=1000), \
+                    mock.patch.object(engine, "_proc_creation_time", return_value=123):
+                self.assertEqual(engine.profile_runtime_confirmed(), expected)
+
+
 class GuardCacheTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="aeloc_guardcache_")

@@ -85,6 +85,7 @@ class EngineStatus:
 
     #: 引擎进程是否在跑
     running: bool = False
+    profile_confirmed: bool = False
     #: 引擎读到的词典条数（engine_dict）
     engine_dict_entries: int = 0
     #: 下拉值词典条数（enum_fill）
@@ -216,6 +217,7 @@ def check(ae_root: str = "", ae_version: str = "") -> EngineStatus:
             st.dict_entries = 0
 
     st.running = engine_running()
+    st.profile_confirmed = st.running and profile_runtime_confirmed()
     st.log_path = engine_log_path()
     try:
         from .enginedict import engine_dict_ready, enum_dict_ready
@@ -928,6 +930,20 @@ def control_status() -> dict:
         return obj if isinstance(obj, dict) else {}
     except Exception:
         return {}
+
+
+def profile_runtime_confirmed() -> bool:
+    """A current control receipt belongs to this data root and a live runtime."""
+    status = control_status()
+    if status.get("protocol") != "aeloc-managed-guard/1" or status.get("control_ready") is not True:
+        return False
+    try:
+        pid = int(status["runtime_pid"])
+        ctime = int(status["runtime_ctime"])
+        age = time.time() - float(status["updated"])
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return False
+    return pid > 0 and ctime > 0 and 0 <= age <= 90 and _proc_creation_time(pid) == ctime
 
 
 def request_reload() -> bool:

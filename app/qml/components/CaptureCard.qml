@@ -13,19 +13,83 @@ Item {
     property var zhMap: Object.create(null)
     property int seenCount: 0
     property bool extracted: false
+    property var diagnosticChannels: []
     property string kindFilter: "all"
     property var activeEditor: null
     property double lastEditAt: 0
 
     readonly property int panePadding: Theme.spaceMd
-    readonly property int kindWidth: 48
+    readonly property int kindWidth: 94
     readonly property real englishWidth: (captureList.width - 2 * panePadding - kindWidth) * 0.43
     readonly property var displayedRows: kindFilter === "all" ? rows
                                         : rows.filter(row => rowKind(row) === kindFilter)
     readonly property int filledCount: Object.keys(zhMap).length
 
+    Basic.Dialog {
+        id: effectOverrideDialog
+        title: "按效果修改下拉译名"
+        modal: true
+        width: Math.min(600, Math.max(340, card.width - 32))
+        x: (card.width - width) / 2
+        y: (card.height - height) / 2
+        standardButtons: Basic.Dialog.Cancel
+        property var options: []
+        property string captureMessage: ""
+        function refreshOptions() {
+            var state = card.backend.effectOptionState(verifiedOptions.checked)
+            options = state.options
+            captureMessage = state.message
+            scopedPicker.currentIndex = -1
+            scopedText.text = ""
+        }
+        onOpened: {
+            verifiedOptions.checked = false
+            refreshOptions()
+        }
+        contentItem: ColumnLayout {
+            spacing: Theme.spaceSm
+            Text {
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                color: Theme.textPrimary
+                text: effectOverrideDialog.captureMessage
+            }
+            Basic.CheckBox {
+                id: verifiedOptions
+                text: "列出已在 AE 18.0.1.1 核验的 Sapphire 条目"
+                onClicked: effectOverrideDialog.refreshOptions()
+            }
+            Basic.ComboBox {
+                id: scopedPicker
+                Layout.fillWidth: true
+                model: effectOverrideDialog.options
+                textRole: "label"
+                displayText: currentIndex < 0 ? "请选择效果、参数和下拉项" : currentText
+                enabled: model.length > 0
+                onActivated: scopedText.text = model[currentIndex].zh || ""
+            }
+            Basic.TextField {
+                id: scopedText
+                Layout.fillWidth: true
+                placeholderText: "输入译名（留空则移除覆盖）"
+                maximumLength: 120
+                enabled: scopedPicker.currentIndex >= 0
+            }
+            Button {
+                Layout.alignment: Qt.AlignRight
+                text: "保存覆盖"
+                enabledButton: scopedPicker.currentIndex >= 0
+                onClicked: {
+                    var choice = scopedPicker.model[scopedPicker.currentIndex]
+                    if (card.backend.saveEffectOption(choice.effect, choice.parameter, choice.en, scopedText.text))
+                        effectOverrideDialog.close()
+                }
+            }
+        }
+    }
+
     function rowKind(row) {
-        if (row.kind === "enum" || row.kind === "manual")
+        if (["enum", "manual", "checkbox", "effect"].includes(row.kind))
             return row.kind
         return "param"
     }
@@ -33,9 +97,10 @@ Item {
     function uniqueRows(items) {
         var seen = new Set()
         return items.filter(function (row) {
-            if (seen.has(row.en))
+            var key = row.en + ":" + rowKind(row)
+            if (seen.has(key))
                 return false
-            seen.add(row.en)
+            seen.add(key)
             return true
         })
     }
@@ -58,6 +123,7 @@ Item {
             return
         capturedRows = result.items || []
         seenCount = result.seen || 0
+        diagnosticChannels = result.channels || []
         recompose()
     }
 
@@ -164,11 +230,9 @@ Item {
         anchors.fill: parent
         spacing: Theme.spaceMd
 
-        Rectangle {
+        Surface {
             Layout.fillWidth: true
             Layout.preferredHeight: commands.implicitHeight + Theme.spaceSm * 2
-            color: Theme.panelFill
-            radius: Theme.radiusCard
 
             RowLayout {
                 id: commands
@@ -214,11 +278,9 @@ Item {
             Layout.fillHeight: true
             spacing: Theme.spaceMd
 
-            Rectangle {
+            Surface {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
-                color: Theme.panelFill
-                radius: Theme.radiusCard
                 clip: true
 
                 ColumnLayout {
@@ -251,6 +313,17 @@ Item {
                         }
                     }
 
+                    Text {
+                        visible: card.diagnosticChannels.length > 0
+                        Layout.fillWidth: true
+                        Layout.leftMargin: card.panePadding
+                        Layout.rightMargin: card.panePadding
+                        text: card.diagnosticChannels.join("；")
+                        color: Theme.warn
+                        wrapMode: Text.WordWrap
+                        font.pixelSize: Theme.fontSmall
+                    }
+
                     RowLayout {
                         Layout.fillWidth: true
                         Layout.leftMargin: card.panePadding
@@ -274,6 +347,8 @@ Item {
                                         { key: "all", label: "全部" },
                                         { key: "param", label: "参数" },
                                         { key: "enum", label: "下拉" },
+                                        { key: "checkbox", label: "复选框" },
+                                        { key: "effect", label: "效果名" },
                                         { key: "manual", label: "手动" }
                                     ]
                                     delegate: Basic.Button {
@@ -401,11 +476,12 @@ Item {
 
                                     Text {
                                         Layout.preferredWidth: card.kindWidth
-                                        text: entry.modelData.junk ? "效果名"
-                                              : entry.modelData.same ? "同形"
-                                              : entry.modelData.stuck ? "未生效"
-                                              : card.rowKind(entry.modelData) === "enum" ? "下拉"
-                                              : card.rowKind(entry.modelData) === "manual" ? "手动" : "参数"
+                                        property string kind: card.rowKind(entry.modelData)
+                                        property string kindText: ({enum:"下拉", checkbox:"复选框", effect:"效果名", manual:"手动"})[kind] || "参数"
+                                        text: kindText + (entry.modelData.stuck ? " · 未生效"
+                                              : entry.modelData.same ? " · 未译"
+                                              : entry.modelData.junk ? " · 待确认"
+                                              : kind === "manual" ? "" : " · 未收录")
                                         color: entry.modelData.same || entry.modelData.stuck ? Theme.warn
                                                : Theme.textSecondary
                                         font.family: Theme.fontFamily
@@ -439,7 +515,7 @@ Item {
                                         color: Theme.textPrimary
                                         placeholderTextColor: Theme.textSecondary
                                         placeholderText: entry.modelData.stuck
-                                                         ? (entry.modelData.why || "引擎未写入") + "，填译名后重试"
+                                                         ? (entry.modelData.why === "capacity" ? "译文超出显示容量" : "已有译文，当前未观察到生效")
                                                          : "输入译名"
                                         font.family: Theme.fontFamily
                                         font.pixelSize: Theme.fontBody
@@ -493,7 +569,7 @@ Item {
                                 horizontalAlignment: Text.AlignHCenter
                                 text: card.rows.length > 0 ? "此类暂无待补词"
                                       : !card.extracted ? "还未提取缺词"
-                                      : card.seenCount > 0 ? "已采集的词都有译名"
+                                      : card.seenCount > 0 ? "本次采集未发现待补词"
                                       : "暂未采集到参数"
                                 color: Theme.textPrimary
                                 font.family: Theme.fontFamily
@@ -519,11 +595,9 @@ Item {
                 }
             }
 
-            Rectangle {
+            Surface {
                 Layout.preferredWidth: Math.max(170, Math.min(272, card.width * 0.29))
                 Layout.fillHeight: true
-                color: Theme.panelFill
-                radius: Theme.radiusCard
 
                 ColumnLayout {
                     anchors.fill: parent
@@ -572,6 +646,13 @@ Item {
                         }
                     }
                     Button {
+                        Layout.fillWidth: true
+                        text: "按效果改下拉译名"
+                        quiet: true
+                        enabledButton: !!card.backend
+                        onClicked: effectOverrideDialog.open()
+                    }
+                    Button {
                         objectName: "addCaptureButton"
                         Layout.fillWidth: true
                         text: "解析并添加"
@@ -582,11 +663,9 @@ Item {
             }
         }
 
-        Rectangle {
+        Surface {
             Layout.fillWidth: true
             Layout.preferredHeight: saveBar.implicitHeight + Theme.spaceSm * 2
-            color: Theme.panelFill
-            radius: Theme.radiusCard
 
             RowLayout {
                 id: saveBar

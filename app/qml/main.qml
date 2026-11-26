@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Layouts
+import QtQuick.Templates as Templates
 import QtQuick.Window
 import QtQuick.Effects
 import AeLocalizer
@@ -45,18 +46,37 @@ Window {
 
     property int pageIndex: 0
     readonly property var navModel: [
-        { label: "翻译", icon: "\uE8C1" },
-        { label: "效果名", icon: "\uE81E" },
-        { label: "引擎", icon: "\uE8AB" },
-        { label: "补词", icon: "\uE82D" },
-        { label: "设置", icon: "\uE713" },
-        { label: "面板与脚本", icon: "\uE8F1" }
+        { section: "工作区", first: true, pages: [
+            { page: 0, label: "插件翻译", icon: "\uE8C1" },
+            { page: 1, label: "效果名称", icon: "\uE8EC" },
+            { page: 3, label: "词条补录", icon: "\uE70F" },
+            { page: 5, label: "面板与脚本", icon: "\uE943" }
+        ] },
+        { section: "管理", first: false, pages: [
+            { page: 2, label: "汉化引擎", icon: "\uE950" },
+            { page: 4, label: "设置", icon: "\uE713" }
+        ] }
     ]
 
     // 窗口保留少量向内缩放余量，并限制在屏幕工作区内。
     function initialExtent(available, minimum, ratio) {
         var withResizeRoom = Math.min(minimum + 40, available - 16)
         return Math.max(minimum, withResizeRoom, Math.round(available * ratio))
+    }
+
+    function syncWallpaper() {
+        if (!backend) return
+        Theme.bgImage = backend.bgImage
+        Theme.bgVideo = backend.bgVideo
+        Theme.bgSceneUrl = backend.bgSceneUrl
+        Theme.bgSceneRev = backend.bgSceneRev
+        Theme.bgBlur = backend.bgBlur
+        Theme.bgBrightness = backend.bgBrightness
+        Theme.bgSaturation = backend.bgSaturation
+        Theme.bgContrast = backend.bgContrast
+        Theme.bgFit = backend.bgFit
+        Theme.bgDim = backend.bgDim
+        Theme.glassBlur = backend.glassBlur
     }
 
     Component.onCompleted: {
@@ -67,11 +87,7 @@ Window {
         }
         if (!backend) return
         Theme.themeMode = backend.uiTheme
-        Theme.bgImage = backend.bgImage
-        Theme.bgDim = backend.bgDim
-        Theme.bgVideo = backend.bgVideo
-        Theme.bgSceneUrl = backend.bgSceneUrl
-        Theme.bgSceneRev = backend.bgSceneRev
+        syncWallpaper()
         Theme.accentKey = backend.accentKey
         Theme.density = backend.density
         Theme.fontScale = backend.fontScale
@@ -79,32 +95,13 @@ Window {
         Theme.plate = backend.plate
         Theme.uiFont = backend.uiFont
         Theme.textCustom = backend.textColor !== "" ? backend.textColor : "transparent"
-        Theme.glassBlur = backend.glassBlur
     }
 
     Connections {
         target: backend
         function onUiThemeChanged() { if (backend) Theme.themeMode = backend.uiTheme }
-        function onBgChanged() {
-            if (!backend) return
-            Theme.bgImage = backend.bgImage
-            Theme.bgDim = backend.bgDim
-            Theme.bgVideo = backend.bgVideo
-        }
-        function onVideoBgChanged() {
-            if (!backend) return
-            Theme.bgVideo = backend.bgVideo
-            Theme.bgSceneUrl = backend.bgSceneUrl
-            Theme.bgSceneRev = backend.bgSceneRev
-            Theme.glassBlur = backend.glassBlur
-            Theme.bgBlur = backend.bgBlur
-            Theme.bgBrightness = backend.bgBrightness
-            Theme.bgSaturation = backend.bgSaturation
-            Theme.bgContrast = backend.bgContrast
-            Theme.bgFit = backend.bgFit
-            Theme.bgDim = backend.bgDim
-            Theme.plate = backend.plate
-        }
+        function onBgChanged() { root.syncWallpaper() }
+        function onVideoBgChanged() { root.syncWallpaper() }
         function onAppearanceChanged() {
             if (!backend) return
             Theme.accentKey = backend.accentKey
@@ -117,13 +114,25 @@ Window {
         }
     }
 
-    Item {
+    Rectangle {
         id: bgLayer
+        color: Theme.bgBase
+        clip: true
         anchors.fill: parent
 
         Item {
             id: bgSource
             anchors.fill: parent
+            layer.enabled: Theme.hasAnyBg && Theme.bgNeedsEffect && GraphicsInfo.api !== GraphicsInfo.Software
+            layer.effect: MultiEffect {
+                autoPaddingEnabled: false
+                blurEnabled: Theme.bgBlur > 0
+                blur: Theme.bgBlurNorm
+                blurMax: Theme.bgBlurMax
+                saturation: Theme.bgSaturationDelta
+                brightness: Theme.bgBrightnessDelta
+                contrast: Theme.bgContrastDelta
+            }
 
             Loader {
                 id: bgVideoLoader
@@ -149,22 +158,11 @@ Window {
                 visible: Theme.bgImage !== "" && Theme.bgVideo === ""
                          && Theme.bgSceneUrl === ""
                 source: Theme.bgImage
+                cache: false
                 fillMode: Theme.bgFit === "contain" ? Image.PreserveAspectFit
                                                     : Image.PreserveAspectCrop
                 asynchronous: true
             }
-        }
-
-        MultiEffect {
-            anchors.fill: parent
-            source: bgSource
-            visible: Theme.hasAnyBg && Theme.bgNeedsEffect
-            blurEnabled: Theme.bgBlur > 0
-            blur: Theme.bgBlurNorm
-            blurMax: Theme.bgBlurMax
-            saturation: Theme.bgSaturationDelta
-            brightness: Theme.bgBrightnessDelta
-            contrast: Theme.bgContrastDelta
         }
 
         Rectangle {
@@ -186,9 +184,16 @@ Window {
         anchors.top: parent.top
         anchors.left: parent.left
         anchors.right: parent.right
-        height: 40
+        height: 44
         GlassBackdrop { anchors.fill: parent; z: -1 }
         color: Theme.titlebarFill
+
+        Rectangle {
+            anchors.bottom: parent.bottom
+            width: parent.width
+            height: 1
+            color: Theme.border
+        }
 
         MouseArea {
             anchors.fill: parent
@@ -202,11 +207,26 @@ Window {
             anchors.rightMargin: Theme.spaceSm
             spacing: 6
 
+            Rectangle {
+                implicitWidth: 26
+                implicitHeight: 26
+                radius: 7
+                color: Theme.actionFill
+                Text {
+                    anchors.centerIn: parent
+                    text: "映"
+                    font.family: Theme.fontDefault
+                    font.pixelSize: 15
+                    font.weight: Font.Bold
+                    color: Theme.actionText
+                }
+            }
+
             Text {
-                text: root.title
+                text: "AeLocalizer"
                 color: Theme.textOnBg
-                font.family: Theme.fontFamily
-                font.pixelSize: Theme.fontBody
+                font.family: "Segoe UI"
+                font.pixelSize: 16
                 font.weight: Font.DemiBold
             }
 
@@ -270,7 +290,7 @@ Window {
         Rectangle {
             id: side
             objectName: "appNavigation"
-            width: Math.max(128, Math.min(172, 128 + (root.width - 900) / 4))
+            width: Math.max(134, Math.min(190, 134 + (root.width - 840) / 6))
             height: parent.height
             GlassBackdrop { anchors.fill: parent; z: -1 }
             color: Theme.chromeFill
@@ -282,117 +302,126 @@ Window {
                 color: Theme.borderSoft
             }
 
-            Column {
-                id: navigation
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.top: parent.top
-                anchors.margins: Theme.spaceSm
-                anchors.topMargin: Theme.spaceLg
-                spacing: Theme.spaceXs
+            readonly property bool compactSidebar: width < 164
+
+            ColumnLayout {
+                anchors.fill: parent
+                anchors.margins: side.compactSidebar ? 6 : Theme.spaceMd
+                spacing: 0
 
                 Repeater {
                     model: root.navModel
+                    delegate: ColumnLayout {
+                        id: navGroup
+                        required property var modelData
+                        Layout.fillWidth: true
+                        spacing: 3
 
-                    delegate: Item {
-                        id: navItem
-                        readonly property bool selected: root.pageIndex === index
-                        width: navigation.width
-                        height: Theme.dense ? 34 : 39
-                        activeFocusOnTab: true
-                        Accessible.role: Accessible.Button
-                        Accessible.name: modelData.label
-                        Accessible.onPressAction: root.pageIndex = index
-                        Keys.onReturnPressed: root.pageIndex = index
-                        Keys.onSpacePressed: root.pageIndex = index
-
-                        Rectangle {
-                            anchors.fill: parent
-                            radius: Theme.radiusControl
-                            color: navItem.selected ? Theme.selectionFill
-                                   : (navMouse.containsMouse || navItem.activeFocus ? Theme.bgHover : "transparent")
+                        Text {
+                            Layout.leftMargin: Theme.spaceSm
+                            Layout.topMargin: navGroup.modelData.first ? Theme.spaceXs : Theme.spaceLg
+                            Layout.bottomMargin: Theme.spaceSm
+                            text: navGroup.modelData.section
+                            color: Theme.textOnBgTertiary
+                            font.family: Theme.fontFamily
+                            font.pixelSize: Theme.fontSmall
+                            font.weight: Font.Medium
                         }
 
-                        Row {
-                            anchors.left: parent.left
-                            anchors.leftMargin: Theme.spaceMd
-                            anchors.verticalCenter: parent.verticalCenter
-                            spacing: Theme.spaceMd
-
-                            Text {
-                                anchors.verticalCenter: parent.verticalCenter
-                                text: modelData.icon
-                                color: navItem.selected ? Theme.textOnBg : Theme.textOnBgSecondary
-                                font.family: Theme.iconFamily
-                                font.pixelSize: 15
-                            }
-                            Text {
-                                anchors.verticalCenter: parent.verticalCenter
+                        Repeater {
+                            model: navGroup.modelData.pages
+                            delegate: Templates.Button {
+                                id: navItem
+                                required property var modelData
+                                readonly property bool selected: root.pageIndex === modelData.page
+                                objectName: "navPage" + modelData.page
+                                Layout.fillWidth: true
+                                implicitHeight: Theme.dense ? 34 : 38
+                                leftPadding: side.compactSidebar ? 7 : Theme.spaceSm + 2
+                                rightPadding: side.compactSidebar ? 5 : Theme.spaceSm
+                                hoverEnabled: true
                                 text: modelData.label
-                                color: navItem.selected ? Theme.textOnBg : Theme.textOnBgSecondary
-                                font.family: Theme.fontFamily
-                                font.pixelSize: Theme.fontBody
-                                font.weight: navItem.selected ? Font.DemiBold : Font.Normal
-                            }
-                        }
+                                Accessible.role: Accessible.PageTab
+                                Accessible.selected: selected
+                                onClicked: root.pageIndex = modelData.page
+                                HoverHandler { cursorShape: Qt.PointingHandCursor }
 
-                        MouseArea {
-                            id: navMouse
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: {
-                                navItem.forceActiveFocus()
-                                root.pageIndex = index
+                                background: Rectangle {
+                                    radius: Theme.radiusControl
+                                    color: navItem.selected ? Theme.selectionFill
+                                           : navItem.hovered ? Theme.bgHover : "transparent"
+                                    border.width: navItem.visualFocus ? 2 : 0
+                                    border.color: Theme.focusRing
+                                }
+                                contentItem: RowLayout {
+                                    spacing: side.compactSidebar ? 6 : Theme.spaceSm + 2
+                                    Text {
+                                        text: navItem.modelData.icon
+                                        color: navItem.selected ? Theme.textPrimary : Theme.textSecondary
+                                        font.family: Theme.iconFamily
+                                        font.pixelSize: 16
+                                    }
+                                    Text {
+                                        Layout.fillWidth: true
+                                        text: navItem.text
+                                        color: navItem.selected ? Theme.textPrimary : Theme.textSecondary
+                                        font.family: Theme.fontFamily
+                                        font.pixelSize: Theme.fontBody
+                                        font.weight: navItem.selected ? Font.DemiBold : Font.Normal
+                                        elide: Text.ElideRight
+                                    }
+                                }
                             }
                         }
                     }
                 }
-            }
 
-            Item {
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.bottom: parent.bottom
-                anchors.margins: Theme.spaceMd
-                height: 43
+                Item { Layout.fillHeight: true }
 
                 Rectangle {
-                    anchors.left: parent.left
-                    anchors.right: parent.right
-                    anchors.top: parent.top
-                    height: 1
-                    color: Theme.borderSoft
-                }
-
-                Column {
-                    anchors.left: parent.left
-                    anchors.right: parent.right
-                    anchors.bottom: parent.bottom
-                    spacing: 3
-
-                    Row {
-                        spacing: 6
-                        Rectangle {
-                            width: 6; height: 6; radius: 3
-                            anchors.verticalCenter: parent.verticalCenter
-                            color: backend && backend.engineRunning ? Theme.success : Theme.textTertiary
+                    Layout.fillWidth: true
+                    implicitHeight: profile.implicitHeight + Theme.spaceMd * 2
+                    radius: Theme.radiusCard
+                    color: Theme.panelFill
+                    border.color: Theme.panelStroke
+                    ColumnLayout {
+                        id: profile
+                        anchors.fill: parent
+                        anchors.margins: side.compactSidebar ? 8 : Theme.spaceMd
+                        spacing: Theme.spaceXs
+                        Text {
+                            text: "引擎状态"
+                            font.family: Theme.fontFamily
+                            font.pixelSize: Theme.fontSmall
+                            color: Theme.textSecondary
+                        }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 6
+                            Rectangle {
+                                implicitWidth: 7
+                                implicitHeight: 7
+                                radius: 4
+                                color: backend && backend.engineProfileConfirmed ? Theme.success : Theme.textTertiary
+                            }
+                            Text {
+                                Layout.fillWidth: true
+                                text: backend ? backend.engineProfileStatus : "引擎未运行"
+                                color: Theme.textPrimary
+                                font.family: Theme.fontFamily
+                                font.pixelSize: Theme.fontSmall
+                                wrapMode: Text.Wrap
+                            }
                         }
                         Text {
-                            text: backend && backend.engineRunning ? "引擎运行中" : "引擎未运行"
-                            color: Theme.textOnBgSecondary
+                            Layout.fillWidth: true
+                            visible: !!backend && backend.engineRunning
+                            text: backend ? "词典 " + backend.engineDictEntries + " 条" : ""
+                            color: Theme.textSecondary
                             font.family: Theme.fontFamily
-                            font.pixelSize: 11
+                            font.pixelSize: Theme.fontSmall
+                            elide: Text.ElideRight
                         }
-                    }
-                    Text {
-                        width: parent.width
-                        visible: backend && backend.engineRunning
-                        text: backend ? "词典 " + backend.engineDictEntries + " 条" : ""
-                        elide: Text.ElideRight
-                        color: Theme.textSecondary
-                        font.family: Theme.monoFamily
-                        font.pixelSize: 10
                     }
                 }
             }
@@ -404,23 +433,29 @@ Window {
             currentIndex: root.pageIndex
 
             PageShell {
-                title: "翻译"
-                AiPage { anchors.fill: parent; backend: root.backend }
+                title: "翻译工作台"
+                description: "选择插件，生成译文并校对草稿。"
+                actions: translationPage.headerActions
+                AiPage { id: translationPage; anchors.fill: parent; backend: root.backend }
             }
             PageShell {
-                title: "效果名"
+                title: "效果名称"
+                description: "按厂商和套装查找效果，编辑显示名称。"
                 NamesPage { anchors.fill: parent; backend: root.backend }
             }
             PageShell {
-                title: "引擎"
+                title: "汉化引擎"
+                description: "查看当前配置的运行状态，管理实时汉化通道。"
                 EnginePage { anchors.fill: parent; backend: root.backend }
             }
             PageShell {
-                title: "补词"
+                title: "词条补录"
+                description: "从 AE 提取词条，补充参数和下拉选项的译名。"
                 CapturePage { anchors.fill: parent; backend: root.backend }
             }
             PageShell {
                 title: "设置"
+                description: "管理工作台外观、数据与更新。"
                 SettingsPage {
                     id: settingsPage
                     anchors.fill: parent
@@ -436,6 +471,7 @@ Window {
             }
             PageShell {
                 title: "面板与脚本"
+                description: "选择 CEP 面板或 JSX 脚本，校对词条并预览汉化结果。"
                 PanelPage {
                     anchors.fill: parent
                     controller: root.backend ? root.backend.panelLocalization : null

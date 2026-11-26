@@ -523,6 +523,45 @@ class PartialChannelTest(unittest.TestCase):
             ok, reason = eng.apply("off", {"pid": 1}, 4)
         self.assertTrue(ok, reason)
 
+    def test_direct_stop_redraws_live_draw_only_host_after_unload(self):
+        eng = self._engine()
+        eng._host_status = mock.Mock(return_value="alive")
+        eng.draw = mock.Mock(_gen=5)
+        events = []
+        eng.draw.mode.side_effect = lambda *_: events.append("disable") or True
+        eng.draw.close.side_effect = lambda **_: events.append("unload") or True
+        with mock.patch("runtime.managed_guard._redraw_host",
+                        side_effect=lambda *_a, **_kw: events.append("redraw")) as redraw:
+            self.assertTrue(eng.close())
+        self.assertEqual(events, ["disable", "unload", "redraw"])
+        redraw.assert_called_once_with(1, attempts=1)
+        self.assertIsNone(eng.host)
+
+    def test_direct_stop_scans_only_when_popup_restore_is_owed(self):
+        for pending in (False, True):
+            with self.subTest(pending=pending), tempfile.TemporaryDirectory() as temp:
+                eng = self._engine()
+                eng._host_status = mock.Mock(return_value="alive")
+                eng.draw = mock.Mock(_gen=5)
+                eng.popup = session = PopupSession(1, temp, "")
+                session.records = [{"raw": b"localized" if pending else b"original",
+                                    "original": b"original"}]
+                with mock.patch.object(session, "scan", side_effect=RuntimeError("unverified layout")) as scan, \
+                        mock.patch.object(session, "close") as close, \
+                        mock.patch("runtime.managed_guard._redraw_host") as redraw:
+                    self.assertEqual(eng.close(), not pending)
+                if pending:
+                    scan.assert_called_once_with()
+                    close.assert_not_called()
+                    eng.draw.close.assert_not_called()
+                    redraw.assert_not_called()
+                    self.assertEqual(eng.stop_stage, "popup-scan")
+                else:
+                    scan.assert_not_called()
+                    close.assert_called_once_with()
+                    redraw.assert_called_once_with(1, attempts=1)
+                    self.assertIsNone(eng.draw)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

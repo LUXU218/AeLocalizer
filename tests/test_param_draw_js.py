@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from pathlib import Path
 
 from runtime import param_draw_hook as pdh
 from runtime import build_profile as bp
@@ -25,6 +26,18 @@ def _profile():
 
 
 class ParamDrawJsTest(unittest.TestCase):
+    def test_checkbox_attachment_rolls_back_without_tearing_down_regular_draws(self):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node unavailable")
+        harness = Path(__file__).with_name("js") / "checkbox_attach_harness.mjs"
+        with tempfile.TemporaryDirectory(prefix="aeloc_checkbox_attach_") as td:
+            template = Path(td) / "candidate.js"
+            template.write_text(pdh.JS, encoding="utf-8")
+            proc = subprocess.run([node, str(harness), str(template)], capture_output=True,
+                                  text=True, encoding="utf-8", timeout=20)
+        self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
+
     def test_pre_post_pending_lifetime_and_off(self):
         self._exercise()
 

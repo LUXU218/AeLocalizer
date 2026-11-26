@@ -316,6 +316,14 @@ def _snapshot(path: str, index: int = 0, wait_ms: int = 2500, scan: bool = False
     # 无头截图：软件渲染，场景实时渲染一律关掉（Chromium 起不来也不该起）
     os.environ["AELOC_WEBENGINE"] = "0"
     app = QGuiApplication(sys.argv)
+    if sys.platform == "win32" and app.platformName() == "offscreen":
+        from PySide6.QtGui import QFontDatabase
+
+        # The offscreen font loader skips Windows TrueType collections.
+        if not QFontDatabase.hasFamily("Microsoft YaHei UI"):
+            font_dir = os.path.join(os.environ["SystemRoot"], "Fonts")
+            for filename in ("msyh.ttc", "msyhbd.ttc"):
+                QFontDatabase.addApplicationFont(os.path.join(font_dir, filename))
     QQuickWindow.setSceneGraphBackend("software")
 
     from app.backend import AppBackend
@@ -353,6 +361,7 @@ def _snapshot(path: str, index: int = 0, wait_ms: int = 2500, scan: bool = False
         backend._status = "扫描完成：%d 组 / %d 文件" % (len(inv.groups), inv.scanned_files)
         for g in inv.groups[:6]:
             g.selected = True
+        backend._syncGroupModel(reset=True)
         backend.inventoryChanged.emit()
         backend.stateChanged.emit()
 

@@ -29,7 +29,8 @@ Item {
     VideoOutput {
         id: out
         anchors.fill: parent
-        fillMode: VideoOutput.PreserveAspectCrop
+        fillMode: Theme.bgFit === "contain" ? VideoOutput.PreserveAspectFit
+                                            : VideoOutput.PreserveAspectCrop
     }
 
     property bool pausedByHide: false

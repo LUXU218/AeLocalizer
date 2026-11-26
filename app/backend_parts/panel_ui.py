@@ -104,7 +104,7 @@ def translate_labels(config, name, labels):
 
 class PanelController(QObject):
     changed = Signal()
-    reviewReady = Signal(str)
+    reviewReady = Signal("QVariantMap")
 
     def __init__(self, backend, folder):
         super().__init__(backend)
@@ -397,13 +397,12 @@ class PanelController(QObject):
         def done(paths):
             self.pending = (selected, saved, output, signer)
             self._status_text("预览已生成")
-            details = "\n".join(paths)
-            if output:
-                details = output
-            message = (f"在当前 Windows 用户下安装包含 {len(selected)} 条译文的 CEP 副本。"
-                       f"\n重启 AE 后，打开菜单中带「简体中文」的面板。\n\n{details}"
-                       if signer else f"应用 {len(selected)} 条译文到以下文件：\n{details}")
-            self.reviewReady.emit(message)
+            self.reviewReady.emit({
+                "mode": "install" if signer else "export" if output else "apply",
+                "targetName": self.target.name,
+                "termCount": len(selected),
+                "files": [output] if output else paths,
+            })
 
         self._task("正在生成预览…", job, done)
 

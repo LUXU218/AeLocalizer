@@ -4,8 +4,9 @@ from pathlib import Path
 
 from PySide6.QtCore import Q_ARG, QMetaObject, QPointF, QRect, Qt, QUrl
 from PySide6.QtGui import QGuiApplication
-from PySide6.QtQml import QQmlApplicationEngine
+from PySide6.QtQml import QQmlApplicationEngine, QQmlComponent
 from PySide6.QtQuick import QQuickItem, QQuickWindow
+from PySide6.QtTest import QTest
 
 
 class WindowGeometryTest(unittest.TestCase):
@@ -58,6 +59,82 @@ class WindowGeometryTest(unittest.TestCase):
             app.processEvents()
             widths.append(sidebar.width())
         self.assertLessEqual(max(widths) - min(widths), 1)
+
+    def test_grouped_navigation_and_translation_actions_at_minimum_size(self):
+        app, engine, window = self.load_window(QRect(0, 0, 1024, 704))
+        theme = engine.singletonInstance("AeLocalizer", "Theme")
+        theme.setProperty("density", "relaxed")
+        theme.setProperty("fontScale", "large")
+        window.resize(window.minimumWidth(), window.minimumHeight())
+        app.processEvents()
+
+        def named_items(item):
+            if item.objectName():
+                yield item.objectName(), item
+            for child in item.childItems():
+                yield from named_items(child)
+
+        items = dict(named_items(window.contentItem()))
+        for index in (1, 3, 5, 2, 4, 0):
+            nav = items[f"navPage{index}"]
+            self.assertTrue(nav.isVisible())
+            label = next(child for child in nav.property("contentItem").childItems()
+                         if child.property("text") == nav.property("text"))
+            self.assertFalse(label.property("truncated"), nav.property("text"))
+            nav.forceActiveFocus(Qt.TabFocusReason)
+            QTest.keyClick(window, Qt.Key_Space)
+            app.processEvents()
+            self.assertEqual(window.property("pageIndex"), index)
+            self.assertEqual(items["startTranslationButton"].isVisible(), index == 0)
+
+        # Both the version picker and the primary action must fit the compact header.
+        version = items["versionBox"]
+        start = items["startTranslationButton"]
+        self.assertLessEqual(version.mapToScene(QPointF(version.width(), 0)).x(),
+                             start.mapToScene(QPointF()).x())
+        self.assertLessEqual(start.mapToScene(QPointF(start.width(), 0)).x(), window.width())
+        self.assertFalse(start.isEnabled())  # No backend in this window.
+
+    def test_wallpaper_card_and_tab_rail_follow_same_translucent_palette(self):
+        app, engine, window = self.load_window(QRect(0, 0, 1200, 800))
+        window.setProperty("pageIndex", 4)
+        component = QQmlComponent(engine)
+        component.setData(b'import QtQml; import AeLocalizer; QtObject { property QtObject theme: Theme }', QUrl())
+        probe = component.create()
+        self.assertIsNotNone(probe, component.errorString())
+        theme = probe.property("theme")
+        card = window.findChild(QQuickItem, "wallpaperSettings")
+        tint = next(item for item in card.childItems() if item.inherits("QQuickRectangle"))
+        # Use a valid image without touching the user's appearance settings.
+        from PySide6.QtGui import QImage
+        from tempfile import TemporaryDirectory
+        with TemporaryDirectory() as folder:
+            path = Path(folder) / "wallpaper.png"
+            image = QImage(8, 8, QImage.Format_RGB32)
+            image.fill(Qt.blue)
+            self.assertTrue(image.save(str(path)))
+            theme.setProperty("bgImage", QUrl.fromLocalFile(str(path)).toString())
+            app.processEvents()
+            for mode in ("light", "dark"):
+                theme.setProperty("themeMode", mode)
+                previous = 0
+                for plate in (0.1, 0.9):
+                    theme.setProperty("plate", plate)
+                    color = tint.property("color")
+                    self.assertEqual(color, theme.property("insetFill"))
+                    self.assertLess(color.alpha(), 255)
+                    self.assertGreater(color.alpha(), previous)
+                    previous = color.alpha()
+            theme.setProperty("bgImage", "")
+            self.assertEqual(tint.property("color").alpha(), 255)
+
+    def test_inactive_panels_allocate_no_wallpaper_sampling_textures(self):
+        _app, _engine, window = self.load_window(QRect(0, 0, 1200, 800))
+        window.setProperty("pageIndex", 4)
+        card = window.findChild(QQuickItem, "wallpaperSettings")
+        def samples(item):
+            return int(item.inherits("QQuickShaderEffectSource")) + sum(samples(c) for c in item.childItems())
+        self.assertEqual(samples(card), 0)
 
     def test_corner_resize_updates_the_requested_edges_and_keeps_opposite_edges_fixed(self):
         _app, _engine, window = self.load_window(QRect(0, 0, 1920, 1040))

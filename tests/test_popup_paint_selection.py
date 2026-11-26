@@ -26,12 +26,37 @@ class PopupPaintSelectionTests(unittest.TestCase):
         lib=Path(r'C:\Program Files\Adobe')/('Adobe After Effects '+str(year))/'Support Files/AfterFXLib.dll'
         return ph.ParamDrawHook(123,{'Amount':'数量'},str(lib)),agent
 
-    def test_classic_host_uses_existing_popup_path(self):
+    def test_classic_host_has_first_draw_without_v2_menu(self):
         hook,agent=self.setup_hook(2022)
-        with mock.patch.dict(sys.modules,{'frida':agent}), \
-             mock.patch.object(ph,'popup_draw_profile',side_effect=AssertionError('extra popup hook on classic host')):
+        with mock.patch.dict(sys.modules,{'frida':agent}):
             self.assertTrue(hook.attach())
-        self.assertEqual(hook.popup_paint_profile,{})
+        profile = hook.popup_paint_profile
+        self.assertTrue(profile['supplemental'])
+        self.assertNotIn('menu', profile)
+        self.assertIn('classic', profile)
+
+    def test_missing_classic_paint_keeps_the_independent_popup_session_eligible(self):
+        hook = ph.ParamDrawHook(123, {}, 'AfterFXLib.dll')
+        with mock.patch.object(hook, '_hash', return_value='checked'), \
+                mock.patch.object(hook, '_ae_year', return_value=2024), \
+                mock.patch.object(hook, '_attach_agent', return_value=True), \
+                mock.patch.object(ph, 'draw_candidate', return_value={}), \
+                mock.patch.object(ph, 'popup_menu_profile', side_effect=ph.BuildMismatch('no V2 menu')), \
+                mock.patch.object(ph, 'classic_popup_paint_profile', side_effect=ph.BuildMismatch('no paint site')), \
+                mock.patch.object(ph, 'popup_label_profile', side_effect=ph.BuildMismatch('no layer label')):
+            self.assertTrue(hook.attach())
+        self.assertEqual(hook.popup_profile_error, '')
+        self.assertEqual(hook.popup_paint_profile, {})
+
+    def test_classic_paint_is_discovered_across_all_six_installed_hosts(self):
+        root = Path(r'C:\Program Files\Adobe')
+        for year in range(2021, 2027):
+            with self.subTest(year=year):
+                dll = root / f'Adobe After Effects {year}' / 'Support Files' / 'AfterFXLib.dll'
+                profile = bp.classic_popup_paint_profile(dll)
+                self.assertTrue(profile['call_bytes'].startswith('ff15'))
+                self.assertEqual(len(bytes.fromhex(profile['call_bytes'])), 6)
+                self.assertEqual(profile['owner']['name'].split('@@')[0], '?Draw@CECStream')
 
     def test_verified_2025_can_translate_during_first_draw_and_menu_open(self):
         hook, agent = self.setup_hook(2025)
@@ -65,7 +90,8 @@ class PopupPaintSelectionTests(unittest.TestCase):
                                   side_effect=ph.BuildMismatch('popup menu evidence differs')):
             self.assertTrue(hook.attach())
         self.assertTrue(hook.text_profile)
-        self.assertEqual(hook.popup_paint_profile, {})
-        self.assertEqual(hook.popup_profile_error, 'popup menu evidence differs')
+        self.assertIn('classic', hook.popup_paint_profile)
+        self.assertNotIn('menu', hook.popup_paint_profile)
+        self.assertTrue(hook.popup_paint_profile['supplemental'])
 
 if __name__=='__main__':unittest.main(verbosity=2)

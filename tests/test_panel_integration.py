@@ -9,6 +9,48 @@ from core.panel_localization import panel_localizer, signed_cep
 
 
 class PanelIntegrationTests(unittest.TestCase):
+    def test_review_reports_selected_changes_and_export_destination(self):
+        try:
+            from PySide6.QtCore import QObject, QUrl
+        except ImportError:
+            self.skipTest("PySide6 不可用")
+        from app.backend_parts.panel_ui import PanelController
+
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            backend = QObject()
+            controller = PanelController(backend, root / "profile")
+            controller.target = panel_localizer.Target("cep", str(root), "", "demo.panel", "Panel <A>", signed=True)
+            controller.report = {}
+            controller.model.load([{"text": key, "sources": ["index.html"]}
+                                   for key in ("Apply", "Demo", "Skip")],
+                                  {"Apply": "应用", "Demo": "Demo", "Skip": "跳过"})
+            controller.choose(2, False)
+            controller.folder.mkdir()
+            controller._cep_signer.touch()
+            previews = []
+            controller.reviewReady.connect(previews.append)
+            with patch.object(controller, "_task", side_effect=lambda _, job, done: done(job())), \
+                    patch.object(controller, "_localizer") as localizer:
+                localizer.return_value.preview.return_value = {"index.html": b"", "ui.js": b""}
+                controller.preview()
+                self.assertEqual(previews.pop(), {
+                    "mode": "install", "targetName": "Panel <A>", "termCount": 1,
+                    "files": ["index.html", "ui.js"],
+                })
+                controller.cancelReview()
+                self.assertIsNone(controller.pending)
+                controller.target = panel_localizer.Target("jsx", str(root), "tools.jsx", "", "Script")
+                localizer.return_value.preview.return_value = {"tools.jsx": b""}
+                controller.preview()
+                self.assertEqual(previews.pop()["mode"], "apply")
+                destination = QUrl.fromLocalFile(str(root / "示例副本.jsx"))
+                controller.preview(destination)
+                self.assertEqual(previews.pop(), {
+                    "mode": "export", "targetName": "Script", "termCount": 2,
+                    "files": [destination.toLocalFile()],
+                })
+
     def test_plain_jsx_copy_and_restore(self):
         with tempfile.TemporaryDirectory() as scratch:
             root = Path(scratch)
