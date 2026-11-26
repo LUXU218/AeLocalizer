@@ -1,19 +1,24 @@
 """分层词典仓库测试：优先级 / 冲突 / 导入预览 / 持久化。"""
+import base64
 import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from core.dictpack import build_pack  # noqa: E402
+from core.dictpack import PackError, build_pack  # noqa: E402
 from core.dictstore import DictStore  # noqa: E402
+from tests.test_dictpack import rewrite_pack_json  # noqa: E402
 
 
-def _pack(entries, pack_id="com.t.pack", name="测试包", version="1.0.0"):
+def _pack(entries, pack_id="com.t.pack", name="测试包", version="1.0.0", **options):
     return build_pack(
-        pack_id=pack_id, name=name, version=version, author="t", entries=entries
+        pack_id=pack_id, name=name, version=version, author="t", entries=entries, **options,
     )
 
 
@@ -44,7 +49,9 @@ class TestDictStore(unittest.TestCase):
     def test_pack_over_builtin(self):
         st = DictStore()
         st.set_builtin({"Glow": "发光"})
-        st.import_pack(_pack({"Glow": {"zh": "光晕"}}))
+        info = st.import_pack(_pack({"Glow": {"zh": "光晕"}}))
+        self.assertFalse(info.signed)
+        self.assertEqual(info.verify_msg, "未签名")
         self.assertEqual(st.lookup("Glow").zh, "光晕")
         self.assertEqual(st.lookup("Glow").layer, "pack")
 
@@ -95,6 +102,61 @@ class TestDictStore(unittest.TestCase):
         self.assertEqual(st.packs[0].version, "2.0.0")
         self.assertIsNone(st.lookup("A"))
         self.assertEqual(st.lookup("B").zh, "新")
+
+    def test_import_signed_pack(self):
+        data = _pack(
+            {"Glow": {"zh": "光晕"}}, sign_key=Ed25519PrivateKey.generate().private_bytes_raw(),
+            glossary={"Glow": {"zh": "光晕"}}, readme="词典说明", license_text="MIT",
+        )
+        store = DictStore()
+        info = store.import_pack(data)
+        self.assertTrue(info.signed)
+        self.assertEqual(info.verify_msg, "签名有效")
+        self.assertEqual(store.lookup("Glow").zh, "光晕")
+
+    def test_rejected_import_preserves_original_layers_packs_and_cache(self):
+        store = DictStore()
+        original = store.import_pack(_pack({"Glow": {"zh": "光晕"}}))
+        store.upsert_user("Blur", "模糊", locked=True)
+        revision = store.revision
+        unsigned = _pack({"Glow": {"zh": "发光"}}, version="2")
+        modified = rewrite_pack_json(
+            unsigned, "dict.json", lambda obj: obj["entries"]["Glow"].update(zh="强光"),
+        )
+        signed = _pack(
+            {"Glow": {"zh": "发光"}}, version="2",
+            sign_key=Ed25519PrivateKey.generate().private_bytes_raw(),
+        )
+        invalid_signature = base64.b64encode(bytes(64)).decode("ascii")
+        invalid = rewrite_pack_json(
+            signed, "manifest.json", lambda obj: obj["signature"].update(sig=invalid_signature),
+        )
+
+        for data, reason in ((modified, "dict.json 校验失败"), (invalid, "签名校验失败")):
+            with self.subTest(reason=reason):
+                previous_cache = store._resolution_cache
+                preview = store.preview_import(data)
+                self.assertFalse(preview.verify_ok)
+                self.assertIn(reason, preview.verify_msg)
+                self.assertIs(store._resolution_cache, previous_cache)
+                resolved = store.resolve()
+                with self.assertRaisesRegex(PackError, reason):
+                    store.import_pack(data)
+                self.assertEqual(store.revision, revision)
+                self.assertIs(store._resolution_cache, resolved)
+                self.assertEqual(store.packs, [original])
+                self.assertEqual(store.lookup("Glow").zh, "光晕")
+                self.assertEqual(store.lookup("Blur").zh, "模糊")
+
+    def test_signing_dependency_is_required_only_for_signed_imports(self):
+        entries = {"Glow": {"zh": "光晕"}}
+        signed = _pack(entries, sign_key=Ed25519PrivateKey.generate().private_bytes_raw())
+        store = DictStore()
+        with patch.dict(sys.modules, {"cryptography.hazmat.primitives.asymmetric.ed25519": None}):
+            with self.assertRaisesRegex(PackError, "无法验证签名"):
+                store.import_pack(signed)
+            self.assertEqual(store.packs, [])
+            self.assertEqual(store.import_pack(_pack(entries)).verify_msg, "未签名")
 
     def test_remove_pack(self):
         st = DictStore()

@@ -66,7 +66,7 @@ Item {
     FileDialog {
         id: importDialog
         title: "导入词典包"
-        nameFilters: ["词典包 (*.json *.aeloc)", "所有文件 (*)"]
+        nameFilters: ["词典包 (*.aeloc)", "所有文件 (*)"]
         onAccepted: if (backend) backend.importPack(selectedFile.toString().replace("file:///", ""))
     }
 

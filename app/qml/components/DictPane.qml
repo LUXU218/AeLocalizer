@@ -84,8 +84,8 @@ ColumnLayout {
 
     FileDialog {
         id: importDialog
-        title: "选择词典包（.json / .aeloc）"
-        nameFilters: ["词典包 (*.json *.aeloc)", "所有文件 (*)"]
+        title: "选择词典包（.aeloc）"
+        nameFilters: ["词典包 (*.aeloc)", "所有文件 (*)"]
         onAccepted: if (root.backend)
                         root.backend.importPack(selectedFile.toString().replace("file:///", ""))
     }

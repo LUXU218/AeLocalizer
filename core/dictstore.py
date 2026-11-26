@@ -9,7 +9,7 @@
 
 设计要点：
   · 每一条都能回答"它为什么是这个译名"（source + 被谁覆盖）
-  · 导入 .aeloc 时给出冲突明细，而不是静默覆盖
+  · 导入 .aeloc 前先校验，桌面入口汇总新增和不同的译名
   · 全程 UTF-8 内存表示；编码只在 encoder 里按目标版本决定
 """
 from __future__ import annotations
@@ -19,7 +19,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional, Tuple
 
-from .dictpack import DictPack, read_pack
+from .dictpack import DictPack, PackError, read_pack
 from .dictpack.pack import verify_pack
 
 #: 层优先级（数值越大越优先）
@@ -106,7 +106,7 @@ class ImportPreview:
     @property
     def summary(self) -> str:
         return (
-            f"新增 {len(self.new)} 条，覆盖你现有 {len(self.overwrite_user)} 条，"
+            f"新增 {len(self.new)} 条，译名不同 {len(self.overwrite_user)} 条，"
             f"相同 {len(self.identical)} 条，被你的锁定词条挡住 {len(self.blocked)} 条"
         )
 
@@ -166,6 +166,8 @@ class DictStore:
         pack = read_pack(data)
         ok, msg = verify_pack(pack)
         pv = ImportPreview(pack=pack, verify_ok=ok, verify_msg=msg)
+        if not ok:
+            return pv
         resolved = self.resolve()
         for key, meta in pack.entries.items():
             zh = meta.get("zh", "")
@@ -187,10 +189,12 @@ class DictStore:
         """导入并启用一个词典包。锁定词条不会被覆盖（解析层保证）。"""
         pack = read_pack(data)
         ok, msg = verify_pack(pack)
+        if not ok:
+            raise PackError(msg)
         pack_id = pack.pack_id
         entries = {k: dict(v) for k, v in pack.entries.items() if v.get("zh")}
 
-        # 同 id 的包视为升级：整包替换
+        # 相同 id 的包整包替换，独立的用户词条层保留。
         self._layers["pack"][pack_id] = entries
         info = PackInfo(
             pack_id=pack_id,

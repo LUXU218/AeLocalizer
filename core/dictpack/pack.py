@@ -2,8 +2,8 @@
 
 设计要点（对应 spec/dictpack-v1.md）：
   · 容器 = ZIP，内含 manifest.json / dict.json / 可选 glossary.json / LICENSE / README / icon
-  · 完整性 = 逐文件 sha256
-  · 签名   = 可选 ed25519（有 cryptography 时启用，无则优雅降级为"未签名"）
+  · 完整性 = 词典数据与已登记文件的 SHA-256
+  · 签名   = 可选 Ed25519，有签名时需通过验证
   · 安全   = 拒绝 zip-slip、拒绝执行、大小与条目上限
 """
 from __future__ import annotations
@@ -36,6 +36,7 @@ class DictPack:
     entries: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     glossary: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     extras: Dict[str, bytes] = field(default_factory=dict)
+    glossary_present: bool = False
 
     @property
     def pack_id(self) -> str:
@@ -51,7 +52,7 @@ class DictPack:
 
     @property
     def signed(self) -> bool:
-        return bool(self.manifest.get("signature"))
+        return "signature" in self.manifest
 
 
 def _sha256(data: bytes) -> str:
@@ -185,48 +186,53 @@ def _sign(manifest: Dict[str, Any], payload: Dict[str, bytes], key: bytes) -> Di
 
 def verify_pack(pack: DictPack) -> tuple[bool, str]:
     """校验完整性（必然）与签名（若存在）。返回 (ok, message)。"""
-    files = pack.manifest.get("files") or {}
+    payload = dict(pack.extras)
+    payload["dict.json"] = _canonical({"schema": SCHEMA, "entries": pack.entries})
+    if pack.glossary_present or pack.glossary:
+        payload["glossary.json"] = _canonical(
+            {"schema": GLOSSARY_SCHEMA, "entries": pack.glossary}
+        )
+
+    files = pack.manifest.get("files")
+    if not isinstance(files, dict) or "dict.json" not in files:
+        return False, "缺少 dict.json 的 SHA-256 校验信息"
+    if "glossary.json" in payload and "glossary.json" not in files:
+        return False, "缺少 glossary.json 的 SHA-256 校验信息"
     for n, meta in files.items():
-        if n not in pack.extras and n not in ("dict.json", "glossary.json"):
+        if n not in payload:
             return False, f"缺少文件 {n}"
-        data = pack.extras.get(n)
-        if n == "dict.json":
-            data = _canonical({"schema": SCHEMA, "entries": pack.entries})
-        elif n == "glossary.json":
-            data = _canonical({"schema": GLOSSARY_SCHEMA, "entries": pack.glossary})
-        if data is None:
-            return False, f"缺少文件 {n}"
-        if _sha256(data) != meta.get("sha256"):
+        if not isinstance(meta, dict) or not meta.get("sha256"):
+            return False, f"缺少 {n} 的 SHA-256 校验信息"
+        if _sha256(payload[n]) != meta["sha256"]:
             return False, f"{n} 校验失败（内容被修改）"
 
-    sig = pack.manifest.get("signature")
-    if not sig:
+    if not pack.signed:
         return True, "未签名"
+    sig = pack.manifest["signature"]
+    if not isinstance(sig, dict) or sig.get("alg") != "ed25519":
+        return False, "签名校验失败（签名格式或算法无效）"
     try:
         import base64
 
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    except ImportError:
+        return False, "无法验证签名（缺少 cryptography）"
 
-        pub = Ed25519PublicKey.from_public_bytes(base64.b64decode(sig["publicKey"]))
-        payload = dict(pack.extras)
-        payload["dict.json"] = _canonical({"schema": SCHEMA, "entries": pack.entries})
-        if pack.glossary:
-            payload["glossary.json"] = _canonical(
-                {"schema": GLOSSARY_SCHEMA, "entries": pack.glossary}
-            )
+    try:
+        pub = Ed25519PublicKey.from_public_bytes(base64.b64decode(sig["publicKey"], validate=True))
         h = hashlib.sha256()
         h.update(_canonical({k: v for k, v in pack.manifest.items() if k != "signature"}))
         for n in sorted(payload):
             h.update(n.encode())
             h.update(payload[n])
-        pub.verify(base64.b64decode(sig["sig"]), h.digest())
+        pub.verify(base64.b64decode(sig["sig"], validate=True), h.digest())
         return True, "签名有效"
     except Exception:
         return False, "签名校验失败（可能被篡改或公钥不符）"
 
 
 def read_pack(data: bytes) -> DictPack:
-    """从字节流解析并校验一个 .aeloc。"""
+    """解析 .aeloc 字节流。完整性与签名由 verify_pack 检查。"""
     if len(data) > MAX_PACK_BYTES:
         raise PackError(f"包体积超过上限 {MAX_PACK_BYTES} 字节")
     try:
@@ -262,7 +268,10 @@ def read_pack(data: bytes) -> DictPack:
         glossary = g.get("entries") or {}
 
     extras = {n: zf.read(n) for n in names if n in ("LICENSE.txt", "README.md", "icon.png")}
-    return DictPack(manifest=manifest, entries=entries, glossary=glossary, extras=extras)
+    return DictPack(
+        manifest=manifest, entries=entries, glossary=glossary, extras=extras,
+        glossary_present="glossary.json" in names,
+    )
 
 
 def write_pack(pack_bytes: bytes, path: str) -> None:

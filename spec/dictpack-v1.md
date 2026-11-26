@@ -1,179 +1,95 @@
-# 词典包规范 aeloc-dict/1（可分发格式）
+# 词典包格式 aeloc-dict/1
 
-> 这是 AeLocalizer · 映 的**公开交换格式**。任何人都可以制作、分享、导入词典包。
-> 设计目标：① 单一文件、双击可导 ② 内容可读可审 ③ 可校验完整性 ④ 可声明适用插件与 AE 版本 ⑤ 支持增量（只含"我改过的"）。
+AeLocalizer 使用 .aeloc 文件备份和交换词条。在桌面工具的「词典」或「设置 → 数据」中可以导入和导出。
 
----
+## 容器
 
-## 1. 容器：`.aeloc` = ZIP
+.aeloc 是未加密的 ZIP。只接受以下名称，文件都位于 ZIP 根目录。
 
-`.aeloc` 就是一个标准 ZIP（无加密），扩展名自定义。内部结构：
+| 文件 | 用途 |
+| --- | --- |
+| `manifest.json` | 必需。包标识、作者、适用范围、哈希和可选签名 |
+| `dict.json` | 必需。词条数据，使用 UTF-8 |
+| `glossary.json` | 可选。用于交换术语，桌面工具导入时记录术语数量 |
+| `LICENSE.txt` | 可选。发布者提供的许可文本 |
+| `README.md` | 可选。说明、致谢和变更记录 |
+| `icon.png` | 可选。图标附件，当前桌面工具不展示 |
 
-```
-mydict.aeloc
-├── manifest.json        # 必需：包元数据 + 文件校验
-├── dict.json            # 必需：词条主体（UTF-8，无 BOM）
-├── glossary.json        # 可选：术语锁定表（跨包共享的强制译名）
-├── LICENSE.txt          # 可选：授权声明（建议 CC BY-SA 4.0 / MIT）
-├── README.md            # 可选：说明、致谢、变更记录
-└── icon.png             # 可选：256×256，列表里显示
-```
+读取器在 ZIP 内读取数据，拒绝名单之外的文件名，不把文件解压到应用目录，也不执行包内内容。ZIP 字节流的上限为 20 MiB（20,971,520 字节），`dict.json` 最多包含 200,000 个词条键。
 
-**为什么用 ZIP 而不是裸 JSON**：单文件便于分发、可放多个文件、可只读打开、Windows 资源管理器原生可解压（用户能自己审查内容）。
+## 清单
 
----
+`manifest.json` 的 `schema` 必须为 `aeloc-dict/1`。建议用反向域名形式的 `id` 标识词典包，并填写 `name`、`version`、`author`、`license` 和 `description`。`created`、`updated`、`homepage` 和 `stats` 可提供发布信息。`appliesTo.aeVersions`、`appliesTo.plugins` 和 `appliesTo.encoding` 可声明适用范围，当前导入和词条裁决不按这些字段过滤。
 
-## 2. manifest.json
+`files` 必须包含 `dict.json` 的 `sha256`，包中有 `glossary.json` 时也必须登记它的 `sha256`。词条和术语 JSON 的哈希按规范化内容计算。使用各自的 schema 和解析出的 entries 对象，按键排序，UTF-8 编码，不转义非 ASCII 字符，也不输出多余空白。哈希值用小写十六进制表示。生成器同时记录 `bytes`，当前校验以 SHA-256 为准。许可、说明和图标可在 `files` 中登记，登记时按原始字节校验。
 
-```jsonc
-{
-  "schema": "aeloc-dict/1",
-  "id": "com.example.packaging-cn",          // 全局唯一，建议反向域名
-  "name": "影视包装常用词",
-  "version": "1.2.0",                         // 语义化版本
-  "author": "AUTHOR_NAME",
-  "homepage": "https://example.com/pack",
-  "license": "CC-BY-SA-4.0",
-  "created": "2026-10-20T10:00:00+08:00",
-  "updated": "2026-10-20T10:00:00+08:00",
-  "description": "针对 Trapcode / Universe / BCC 的常用参数译名",
+`signature` 可省略。提供时，`alg` 为 `ed25519`，`publicKey` 和 `sig` 分别是 32 字节公钥和 64 字节签名的 Base64 表示。签名输入是以下内容依次拼接后的 SHA-256 原始摘要。
 
-  "appliesTo": {
-    "aeVersions": ["2024", "2025", "2026"],   // 空数组 = 全部
-    "plugins": ["Trapcode Particular", "Universe", "BCC Continuum"],
-    "encoding": "auto"                        // auto | gbk | utf8
-  },
+1. 移除 `signature` 后的规范化清单 JSON。
+2. 按文件名排序，逐个拼接载荷文件名的 UTF-8 字节和该文件内容。词条、术语使用上述规范化 JSON，其他附件使用原始字节。
 
-  "stats": { "entries": 2301, "glossary": 214 },
+完整性校验通过的未签名包可以导入。已有签名时必须通过验证，字段为空、签名无效或缺少验证库时导入会停止并提示原因。「签名有效」表示签名通过了包内公钥的验证。确认作者身份还需要通过独立可信渠道核对公钥。
 
-  "files": {
-    "dict.json":     { "sha256": "HEX64", "bytes": 182344 },
-    "glossary.json": { "sha256": "HEX64", "bytes": 8412 }
-  },
+## 词条
 
-  "signature": {
-    "alg": "ed25519",
-    "publicKey": "BASE64_32BYTES",
-    "sig": "BASE64_64BYTES"                   // 对 canonical(manifest 去掉 signature) + 各文件 sha256 签名
-  }
-}
-```
-
-**签名是可选的**。没有 `signature` 时导入界面显示「未签名」黄色徽标；有签名且校验通过显示「已验证」绿色徽标。
-**签名不阻止导入**，只用于让用户判断来源可信度。
-
----
-
-## 3. dict.json
-
-```jsonc
+```json
 {
   "schema": "aeloc-dict/1",
   "entries": {
     "Glow Threshold": {
       "zh": "发光阈值",
-      "scope": ["Trapcode Particular"],   // 空/缺省 = 全局
-      "priority": 50,                     // 冲突裁决，默认 50，越大越优先
-      "note": "官方术语",                  // 可选，编辑器里作为提示
-      "locked": false                      // true = 导入后不允许被低层覆盖
-    },
-    "Matte": { "zh": "遮罩", "priority": 100, "locked": true }
+      "scope": ["Trapcode Particular"],
+      "priority": 50,
+      "note": "常用译名",
+      "locked": false
+    }
   }
 }
 ```
 
-**硬性约束**：
-- 键（英文原名）必须是插件里**逐字节原样**的字符串，不做 trim、不改大小写
-- 值 `zh` 必须是 UTF-8 合法字符串，禁止控制字符、U+FFFD、emoji
-- 同一包内键不可重复（ZIP 内 JSON 天然保证）
-- `scope` 里的插件名必须与 AeLocalizer 扫描到的显示名一致（导入时会校验并提示不匹配项）
+- 键应使用插件中的原文。匹配区分大小写并保留空白。
+- 键和 `zh` 必须为非空字符串。`zh` 拒绝 U+0000–U+0008、U+000B–U+000C、U+000E–U+001F 及 U+FFFD。导入校验接受 emoji。AE 中的实际显示还取决于运行时编码和控件容量。
+- 作者应避免重复键。当前使用 Python 默认的 JSON 解析器，同一对象内的重复键取最后一个值。见 [Python JSON 文档](https://docs.python.org/3.12/library/json.html#repeated-names-within-an-object)。
+- 格式没有单条译名长度上限。运行时另按目标位置的编码和容量处理，不能写入译名时可能保留原文。
+- 可随词条保存 `scope`、`priority`、`note` 和 `locked`。若提供 `priority`，应使用整数。它随解析结果保留，目前不参与词条裁决。导入时不校验 `scope` 中的插件名，裁决时不按它限定插件。包内 `locked` 不会锁定本地词条。桌面界面没有这些包字段的独立编辑控件。
 
----
+## 术语表
 
-## 4. glossary.json（术语锁定表）
-
-用于跨包强制一致，例如「Mask 一律翻蒙版、Matte 一律翻遮罩」：
-
-```jsonc
+```json
 {
   "schema": "aeloc-glossary/1",
   "entries": {
-    "Mask":  { "zh": "蒙版", "strict": true },
-    "Matte": { "zh": "遮罩", "strict": true },
+    "Mask": { "zh": "蒙版", "strict": true },
     "Opacity": { "zh": "不透明度", "strict": false }
   }
 }
 ```
 
-- `strict: true` → 词条里出现该词时**强制**用此译名（AI 翻译时也作为不可违反的约束注入 prompt）
-- `strict: false` → 仅作建议
+可以随包交换术语和 `strict` 标记。桌面导入只保存术语数量，包内术语不参与词条裁决，也不会加入应用的 AI 翻译术语表。将包内术语接入桌面词典和翻译流程属于规划。
 
----
+## 导入与冲突
 
-## 5. 冲突与优先级
+桌面入口先检查包，校验通过后导入并保存。成功提示显示签名状态及新增、不同、相同和被本地锁定词条挡住的数量。「译名不同」统计与已有生效译名的差异，最终生效情况由词典层级决定。
 
-导入后按以下顺序裁决（高者胜）：
+词典层级从高到低为本地锁定词条、本地词条、已启用的词典包、内置词条。多个已启用的包包含同一词条时，最后导入的包优先。再次导入相同 `id` 会替换该包并把它放到导入顺序的末尾，本地词条保留。当前按 `id` 替换，不比较版本号，也没有升级确认或降级提示。
 
-```
-① 用户锁定词条 (locked, 本地)         ← 永不被包覆盖
-② 包内 locked 词条
-③ 用户词条（本地，priority 高者）
-④ 导入的包（按 manifest.priority 或导入顺序）
-⑤ 内置权威表
-⑥ 规则翻译
-```
+逐条选择冲突译名、图形化签名徽标、版本比较和升级确认属于规划。
 
-**导入时的冲突提示**：显示"本包有 42 条会覆盖你现有的译名"，可逐条查看差异，支持"全部保留我的 / 全部用包的 / 逐条选"。
+## 导出
 
----
+桌面工具导出当前全部生效词条，生成一个未签名的 .aeloc 备份。可在另一套 AeLocalizer 中通过「导入词典包」读取。增量导出、桌面附带术语表或许可文件、密钥和签名选项属于规划。开发者可以直接用 `build_pack()` 附加术语、许可、说明、图标或签名。
 
-## 6. 校验与安全
+以下示例生成可直接导入的最小词典包。
 
-| 项 | 做法 |
-|---|---|
-| 结构校验 | JSON Schema 校验（schema 字段 + 必填项 + 类型） |
-| 完整性 | 逐文件 sha256 与 manifest 比对 |
-| 签名 | 有则验 ed25519；无则标"未签名" |
-| 内容审查 | 拒绝含控制字符/U+FFFD/emoji 的译名；拒绝超长（超长项标黄不拒绝） |
-| 路径安全 | 解压时拒绝 `..`、绝对路径、符号链接（防 zip-slip） |
-| 大小限制 | 单包 ≤ 20 MB，条目 ≤ 200,000 |
-| 执行安全 | **绝不执行包内任何脚本**；只读 JSON/图片 |
+```python
+from core.dictpack import build_pack, write_pack
 
----
-
-## 7. 导出（"把我的词典给别人"）
-
-导出对话框选项：
-
-```
-[✓] 只导出我改过的词条（相对内置表）
-[ ] 导出全部生效词条
-[✓] 附带术语表
-[✓] 附带 LICENSE 与 README
-[ ] 用我的密钥签名（需先生成密钥对）
-压缩级别：[标准 ▾]
-```
-
-产物：单个 `.aeloc` 文件，可直接微信/QQ/网盘发给别人，对方双击或拖进软件即可导入。
-
----
-
-## 8. 版本与升级
-
-- 同一个 `id` 的包，导入时若已存在旧版 → 提示"检测到 v1.1.0，是否升级到 v1.2.0"并显示新增/修改条数
-- 升级保留用户的本地锁定词条
-- 包内 `version` 降低时警告"这是旧版本"
-
----
-
-## 9. 最小可用示例（可直接复制使用）
-
-manifest.json：
-```json
-{"schema":"aeloc-dict/1","id":"com.example.hello","name":"示例词典","version":"1.0.0","author":"YOU","license":"MIT","created":"2026-10-20T10:00:00+08:00","appliesTo":{"aeVersions":[],"plugins":[],"encoding":"auto"},"stats":{"entries":2,"glossary":0},"files":{"dict.json":{"sha256":"PUT_REAL_HASH","bytes":120}}}
-```
-
-dict.json：
-```json
-{"schema":"aeloc-dict/1","entries":{"Glow Threshold":{"zh":"发光阈值"},"Wrap X":{"zh":"环绕 X"}}}
+data = build_pack(
+    pack_id="com.example.hello",
+    name="示例词典",
+    version="1.0.0",
+    author="示例作者",
+    entries={"Glow Threshold": {"zh": "发光阈值"}},
+)
+write_pack(data, "example.aeloc")
 ```

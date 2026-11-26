@@ -1,5 +1,6 @@
 """词典包安全与格式测试。"""
 import io
+import json
 import sys
 import unittest
 import zipfile
@@ -9,6 +10,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from core.dictpack import build_pack, read_pack  # noqa: E402
 from core.dictpack.pack import PackError, verify_pack  # noqa: E402
+
+
+def rewrite_pack_json(data, name, edit):
+    """Update one JSON member in a synthetic ZIP without recalculating its manifest."""
+    result = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(data)) as source, zipfile.ZipFile(result, "w") as target:
+        for member in source.namelist():
+            content = source.read(member)
+            if member == name:
+                obj = json.loads(content)
+                edit(obj)
+                content = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+            target.writestr(member, content)
+    return result.getvalue()
 
 
 class TestDictPack(unittest.TestCase):
@@ -32,6 +47,32 @@ class TestDictPack(unittest.TestCase):
         pack.entries["a"]["zh"] = "被改了"
         ok, msg = verify_pack(pack)
         self.assertFalse(ok)
+
+    def test_missing_dictionary_hash_is_rejected(self):
+        data = build_pack(pack_id="c", name="n", version="1", author="a", entries={})
+        data = rewrite_pack_json(data, "manifest.json", lambda manifest: manifest.pop("files"))
+        self.assertEqual(verify_pack(read_pack(data)), (False, "缺少 dict.json 的 SHA-256 校验信息"))
+
+    def test_missing_glossary_hash_is_rejected(self):
+        data = build_pack(
+            pack_id="c", name="n", version="1", author="a", entries={},
+            glossary={"Mask": {"zh": "蒙版"}},
+        )
+        data = rewrite_pack_json(
+            data, "manifest.json", lambda manifest: manifest["files"].pop("glossary.json"),
+        )
+        self.assertEqual(verify_pack(read_pack(data)), (False, "缺少 glossary.json 的 SHA-256 校验信息"))
+
+    def test_present_but_empty_signature_is_rejected(self):
+        original = build_pack(pack_id="c", name="n", version="1", author="a", entries={})
+        for signature in (None, {}, ""):
+            with self.subTest(signature=signature):
+                data = rewrite_pack_json(
+                    original, "manifest.json", lambda manifest: manifest.update(signature=signature),
+                )
+                pack = read_pack(data)
+                self.assertTrue(pack.signed)
+                self.assertEqual(verify_pack(pack), (False, "签名校验失败（签名格式或算法无效）"))
 
     def test_zip_slip_blocked(self):
         buf = io.BytesIO()

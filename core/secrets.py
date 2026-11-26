@@ -1,22 +1,9 @@
-"""API Key 的安全存储（Windows DPAPI 加密）。
+"""使用 Windows DPAPI 保存 API Key。
 
-★ 需求（2026-10-22）：
-  Key 要能保存住，但绝不能明文落盘。
-
-★ 为什么用 DPAPI 而不是自己造 AES：
-  · CryptProtectData 由系统托管密钥，密钥绑定【当前 Windows 用户】
-  · 拷到别的机器 / 别的用户 -> 解不开（连同用户名一起被保护）
-  · 不需要在程序里存放任何主密钥，避免"密钥写死在代码里"的伪加密
-  · Windows 原生 API，无第三方依赖
-
-★ 存储形态：
-  %LOCALAPPDATA%\\AeLocalizer\\ai_key.dat
-  内容 = b"LXK1" + DPAPI 密文（二进制，绝不含明文）
-  换 Key 时旧密文会留一份：ai_key.dat.bak（同样只有密文）
-
-★ 安全约定：
-  · 任何日志/异常信息都不得包含 Key 原文
-  · 明文只存在于进程内存，退出即随对象回收
+应用在当前 Windows 用户的上下文调用 CryptProtectData，由系统管理加密密钥。
+默认的 ai_key.dat 存放 LXK1 文件标记和 DPAPI 密文。更换密钥时备份旧密文。
+保存路径只写入加密结果，日志应省略密钥。加解密和发送请求时会使用
+明文缓冲区，普通的内存释放不会清零缓冲区。
 """
 from __future__ import annotations
 
@@ -29,13 +16,7 @@ from typing import Tuple
 #: 文件魔数（用于识别与版本演进）
 MAGIC = b"LXK1"
 
-#: 上一个 Key 的备份后缀。
-#:
-#: ★★ 2026-10-23 用户报障：
-#:   「退出重进，它就会自动替换掉我原来有效的密钥，导致 API key 没用。」
-#:   根因是【测试/脚本】直接往真实用户目录写假 Key（详见 tests/test_backend.py），
-#:   把用户真实的 DPAPI 密文覆盖掉了，且无法恢复。
-#:   现在换 Key 时先把旧密文留一份：即使再被覆盖，也能一键恢复上一个。
+#: 保存新 Key 时备份上一份可解密的密文。测试须使用隔离的数据目录。
 BACKUP_SUFFIX = ".bak"
 
 #: 默认存储路径
@@ -91,7 +72,7 @@ def _dpapi(protect: bool, data: bytes) -> bytes:
     try:
         return ctypes.string_at(blob_out.pbData, blob_out.cbData)
     finally:
-        # 释放系统分配的内存（明文/密文都可能在内，必须清）
+        # 释放 DPAPI 分配的缓冲区。
         try:
             kernel32.LocalFree(blob_out.pbData)
         except Exception:
@@ -153,7 +134,7 @@ def save_key(key: str, path: str = "", keep_previous: bool = True) -> Tuple[bool
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, p)
-        # 收紧权限：只允许当前用户读写（防同机其他账户窥探）
+        # Windows 上 chmod 在这里清除只读属性，文件访问权限由 ACL 决定。
         try:
             import stat
 
@@ -230,8 +211,7 @@ def has_previous(path: str = "") -> bool:
 def restore_previous(path: str = "") -> str:
     """把备份里的上一个 Key 恢复成当前 Key。返回恢复出来的 Key（失败为空串）。
 
-    ★ 恢复时 keep_previous=False：否则会把"当前被覆盖的假 Key"又备份一遍，
-      反而把真正的旧备份冲掉。
+    恢复时使用 keep_previous=False，以保留用于恢复的旧密文备份。
     """
     p = path or default_path()
     old = previous_key(p)

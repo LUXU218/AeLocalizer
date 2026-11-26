@@ -2,7 +2,7 @@
 
 AeLocalizer 是 Windows 上的 After Effects 插件本地化工具。选择需要汉化的插件后，可以分别启用效果名和参数名、下拉值的汉化。工具也支持管理词条、调用自配的翻译服务，以及处理兼容的 CEP 面板和明文 JSX 脚本。
 
-当前源码版本为 **1.0.28**。项目面向 AE 2021–2026，实时通道按实际运行的构建校验。AE 本体、第三方插件和翻译服务均需自行安装或配置。
+当前源码版本为 **1.0.28**。项目面向 AE 2021–2026。具体构建、已验证的功能和已知问题见 [AE 兼容性说明](docs/COMPATIBILITY.md)。AE 本体、第三方插件和翻译服务均需自行安装或配置。
 
 Windows x64 便携版可从 [GitHub Releases](https://github.com/LUXU218/AeLocalizer/releases/latest) 下载。完整解压后，运行 `AeLocalizer.exe`。
 

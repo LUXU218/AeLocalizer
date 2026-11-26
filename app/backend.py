@@ -30,6 +30,7 @@ from core.ai.pipeline import Cache, Translator
 from core.ai.providers import AIConfig, PRESETS, mask_key
 from core import attrib, engine
 from core import guardruntime, paramledger
+from core.dictpack import PackError
 from core.dictstore import DictStore
 from core.encoder import WORLD_ANSI, describe
 from core.effects import load_effect_names, merge_into_store
@@ -1730,11 +1731,10 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
             if mode != "on":
                 text = ("当前已发现的参数/下拉已还原原文" if background
                         else "参数/下拉已还原原文")
-            # 下拉通道曾在本次会话写入过、OFF 时无法确认还原：不得声称
-            # "已还原原文/已安全拒写"，否则是 partial-as-success（R3）。
+            # 会话写入或重连后可能缺少下拉恢复所需的记录。
             if mode != "on" and st.get("popup_restore_unknown"):
-                text = ("参数已还原原文；下拉通道状态未知（可能未还原，"
-                        "建议重开 AE 或重启工具）")
+                text = ("参数已还原原文；下拉通道状态未知，可能仍显示译文。"
+                        "如仍显示译文，请保存工程并重启 AE。")
                 if background:
                     text += "，正在检查新增效果…"
                 return text
@@ -1745,13 +1745,11 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
                 if st.get("popup_restore_unknown"):
                     text += "；下拉通道状态未知（可能未还原）"
                 elif mode != "on":
-                    # OFF 前 popup 曾写入、refresh("on") 瞬态失败后已被 drop：
-                    # 无法确认已还原，不能声称“已还原原文/已安全拒写”。
-                    text = ("参数可能已还原原文；下拉通道可能未还原"
-                            "（详见诊断，建议重开 AE）")
+                    # 刷新失败可能已清除下拉会话，无法确认停用后的结果。
+                    text = ("参数可能已还原原文；下拉通道可能未还原。"
+                            "如仍显示译文，请保存工程并重启 AE。")
                 else:
-                    # ON 时 popup 也可能“先写入过、refresh("on") 瞬态失败后被 drop”，
-                    # 因此不能声称"已安全拒写"（reviewer delta-5 低危残留）。
+                    # 刷新失败之前，下拉会话可能已经写入过译文。
                     popup_error = getattr(self, "_autoAdaptPopupError", "") or st["popup_error"]
                     text += "；下拉通道不可用：%s" % str(popup_error)[:150]
             if background:
@@ -1891,31 +1889,29 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
     @Slot(str)
     def importPack(self, path: str):
         if not path or not os.path.exists(path):
-            self.toast.emit("warn", "请先选择一个词典包文件（.json / .aeloc）")
+            self.toast.emit("warn", "请先选择一个 .aeloc 词典包")
             return
         try:
             with open(path, "rb") as f:
                 data = f.read()
             pv = self._store.preview_import(data)
+            if not pv.verify_ok:
+                raise PackError(pv.verify_msg)
             info = self._store.import_pack(data)
             self._store.save(os.path.join(DATA_ROOT, "store.json"))
             self._hot_reload_notify()
             self.stateChanged.emit()
             self._bump_dict()
             self.toast.emit(
-                "info", "已导入 %s v%s（%d 条）· %s" % (info.name, info.version, info.entries, pv.summary)
+                "info", "已导入 %s v%s（%d 条，%s）· %s"
+                % (info.name, info.version, info.entries, info.verify_msg, pv.summary)
             )
         except Exception as exc:
             self.toast.emit("error", "导入失败：%s" % exc)
 
     @Slot(str, result=str)
     def exportDict(self, path: str):
-        """把当前生效词典导出成 .aeloc 词典包（2026-10-28)。
-
-        用项目正式的词典包容器 —— 导出的文件可直接经「导入词典包」
-        回灌(带冲突预览),备份/搬机器一步到位。扁平 JSON 那版作废:
-        导入词典包不认它,导出导入无法闭环(A16 实测教训)。
-        """
+        """把当前全部生效词条导出为可重新导入的 .aeloc 词典包。"""
         path = (path or "").strip().replace("file:///", "")
         if not path:
             return "未指定导出路径"

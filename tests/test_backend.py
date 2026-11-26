@@ -113,6 +113,66 @@ class TestBackend(unittest.TestCase):
         self.assertIn("deepseek", self.b.aiBaseUrl)
         self.assertEqual(self.b.aiModel, "deepseek-chat")
 
+    def test_import_pack_reports_failure_without_saving_or_reloading(self):
+        from tempfile import TemporaryDirectory
+        from unittest.mock import patch
+
+        from PySide6.QtTest import QSignalSpy
+
+        import app.backend as backend_mod
+        from core.dictpack import build_pack
+        from core.dictstore import DictStore
+        from tests.test_dictpack import rewrite_pack_json
+
+        store = DictStore()
+        store.upsert_user("Glow", "我的光晕")
+        previous = store.import_pack(build_pack(
+            pack_id="com.test", name="旧测试包", version="1", author="test",
+            entries={"Old": {"zh": "旧词条"}},
+        ))
+        original = build_pack(
+            pack_id="com.test", name="测试包", version="2", author="test",
+            entries={"Glow": {"zh": "光晕"}, "Blur": {"zh": "模糊"}},
+        )
+        invalid = rewrite_pack_json(
+            original, "dict.json", lambda obj: obj["entries"]["Blur"].update(zh="不同的译名"),
+        )
+        with TemporaryDirectory(dir=self._tmpdir) as tmp:
+            existing = Path(tmp, "store.json")
+            store.save(str(existing))
+            snapshot = existing.read_bytes()
+            source = Path(tmp, "test.aeloc")
+            source.write_bytes(invalid)
+            toast = QSignalSpy(self.b.toast)
+            with (
+                patch.object(backend_mod, "DATA_ROOT", tmp),
+                patch.object(self.b, "_store", store),
+                patch.object(self.b, "_hot_reload_notify") as reload_engine,
+                patch.object(self.b, "_bump_dict") as refresh_dict,
+            ):
+                self.b.importPack(str(source))
+                self.assertEqual(toast.count(), 1)
+                self.assertEqual(toast.at(0), ["error", "导入失败：dict.json 校验失败（内容被修改）"])
+                self.assertEqual(existing.read_bytes(), snapshot)
+                self.assertEqual(store.packs, [previous])
+                reload_engine.assert_not_called()
+                refresh_dict.assert_not_called()
+
+                source.write_bytes(original)
+                self.b.importPack(str(source))
+                self.assertEqual(toast.count(), 2)
+                level, message = toast.at(1)
+                self.assertEqual(level, "info")
+                self.assertIn("已导入 测试包", message)
+                self.assertIn("未签名", message)
+                self.assertIn("译名不同 1 条", message)
+                persisted = DictStore.load(str(existing))
+                self.assertEqual(persisted.lookup("Glow").zh, "我的光晕")
+                self.assertEqual(persisted.lookup("Blur").zh, "模糊")
+                self.assertIsNone(persisted.lookup("Old"))
+                reload_engine.assert_called_once()
+                refresh_dict.assert_called_once()
+
     # ---------------- 引擎相关 ----------------
 
     def test_engine_properties_exist(self):
