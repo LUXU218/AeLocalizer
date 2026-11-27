@@ -23,7 +23,7 @@ Ghidra 反编译 TDB_StreamBase::GetDisplayName（TDB.dll RVA 0x31A20）::
 界面每次绘制都调 GetDisplayName 取这个引用，所以直接改写这段缓存并同步
 _Mysize，正在运行、已经建好的效果会立刻换名，不用重启 AE。
 
-★★ 2026-11-06 关键边界（用户硬要求，勿回退）
+2026-11-06 显示名称的写入边界
 -------------------------------------------
 AE「效果控件」面板的效果标题走的是这里的 TDB 流显示名缓存；
 而 AE 顶部「效果」菜单和「效果和预设」面板的效果名走的是
@@ -1355,10 +1355,8 @@ class LiveParams(object):
             if not self.flt_base:
                 return out
             key = self._parade_key()
-            # ★ 2026-11-07 晚：parade 对象在**私有堆**里（约 105MB），
-            #   而 iter_scan_regions 的自然顺序要先走完一大片映射区才轮到它
-            #   → 分片后十几拍都拿不到根，用户体感「直接不汉化」。
-            #   所以把私有堆区间排在前面：两拍内就能拿到 parade。
+            # parade 对象在约 105 MB 的私有堆。先扫描私有堆，避免分片先扫完
+            # 映射区后才找到根对象。实测可在两轮内定位 parade。
             regs = [(b, sz) for b, sz in iter_heap_regions(self.p)
                     if sz <= _EFFECT_REGION_MAX]
             _seen = set(regs)
@@ -1993,7 +1991,7 @@ class NameTable:
 # 也就是说：实例名同时存在两份副本，+0x10 是 MBCS 单字节名，+0xF0 是宽字符
 # 显示名缓存。「效果控件」面板标题读的是 GetEffectName 那一族（+0x10），
 # 所以**只改 +0xF0 时面板标题纹丝不动** —— 这正是 2026-11-06 那一版真机上
-# 日志写「效果标题已经是中文」而用户看到 S_TextureSpots 的原因。
+# 日志曾记录缓存已更新，但效果控件仍显示英文的 S_TextureSpots。
 #
 # 与 FLT_FCSpec 注册表条目的唯一区别就是虚表（两者布局相同）：
 #   注册表条目 vtable = flt_base + profile.fc_vtable  ← 必须只读，写它顶部
@@ -2078,7 +2076,7 @@ class EffectName(object):
 _EFFECT_OBJ_MEMO: Dict[tuple, List[tuple]] = {}
 _EFFECT_SCAN_AT: Dict[tuple, float] = {}
 #: 全量重扫「效果名字段」的最小间隔（秒）。0.4 秒一拍 + 这个上限 = 新加的
-#: 效果最迟 0.9 秒变中文，远低于用户要求的 2 秒；同时避免每拍都读一遍全堆。
+#: 效果最迟约 0.9 秒显示译名，满足 2 秒内更新的目标，同时避免每轮遍历全堆。
 _EFFECT_SCAN_MIN = 0.5
 #: 上一拍「效果名字段」的诊断（app/backend.py 写进 live_watch.log）
 _EFFECT_DIAG: Dict[str, object] = {}

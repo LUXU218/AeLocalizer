@@ -154,9 +154,7 @@ class LiveNamesTests(unittest.TestCase):
     def test_apply_shortens_toolong_instead_of_dropping_it(self):
         # ★ 2026-11-06 回归:「保存过的工程只有部分效果名汉化」的第二条根因。
         #   48 字节显示名字段装不下超长译文(词库里确有 16 条效果名 > 47 字节),
-        #   原实现让 encode_name 抛 ValueError 冒到 apply 外,导致**整批**全不写;
-        #   只跳过的版本虽然不再拖垮整批,那条效果名仍停在英文 —— 用户看到的
-        #   依然是「部分汉化」。现在按标点收口后照写。
+        #   编码错误曾阻止整批写入。按标点提取可容纳的名称主干后继续写入。
         translations = self._translations()
         first = next(iter(translations))
         long_text = "BCC 平面粒子系统，可发射、飘散、生成雪/尘/火花等二维粒子"

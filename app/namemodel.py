@@ -5,7 +5,7 @@
   ListView 会整表重置、滚动条弹回顶部、输入框失焦。
   用 dataChanged(单行) 才能边打字边保持位置。
 
-★★ 2026-10-23 用户需求：「按插件名称，批量选择」
+按厂商筛选和批量勾选：
   · 勾选状态放在模型里（按英文名记，切筛选/切插件不丢）
   · 支持按厂商（vendor）筛选：只看 BCC / Sapphire / …
   · 支持"全选当前筛选结果"，再配合批量操作（清空 / AI 重译）
@@ -100,8 +100,7 @@ class NameListModel(QAbstractListModel):
     # ---------- 数据 ----------
 
     def setRows(self, rows: List[NameRow]):
-        # ★ 2026-11-01 性能：内容没变就不整表 reset —— 切页 reload 是高频操作，
-        #   无条件 reset 会把全部 delegate/分区头销毁重建（用户看到的就是「卡一下」）
+        # 切页时若数据和筛选结果均未变化，直接保留列表，避免重建所有行和分组标题。
         if self._all == list(rows) and self._rows == self._filtered():
             return
         self.beginResetModel()
@@ -220,8 +219,7 @@ class NameListModel(QAbstractListModel):
     def toggleSelectedByEn(self, en: str, shift: bool = False) -> bool:
         """点击勾选：普通点击 = 切换 + 记锚点；Shift 点击 = 从锚点连选到这一行。
 
-        ★ 2026-10-23 用户要求：「按住 shift 点击再点另一个进行多选」。
-          规则跟资源管理器一致：
+        区间选择沿用资源管理器的操作方式：
             · 普通点击：切换这一行，并把这一行记成锚点
             · Shift+点击：把锚点到这一行之间的所有可见行，统一设成
               「这一行点击后的状态」（原本没选就都选上，原本已选就都取消）
@@ -374,9 +372,7 @@ class NameListModel(QAbstractListModel):
     def selectByEnList(self, ens: List[str]):
         """按英文名单勾选（替换当前勾选）。返回 (匹配数, 未匹配名单)。
 
-        ★ 2026-10-25 用户反馈：「单独复制英文再批量写入没有效果」——
-          现在纯英文名单会转成勾选：配合筛选/批量操作，或先粘名单再粘
-          纯中文行一次写入。
+        只粘贴英文名单时先按名称勾选，便于批量操作或接着粘贴中文译名。
         """
         alive = {r.en for r in self._all}
         new_sel = {en for en in ens if en in alive}

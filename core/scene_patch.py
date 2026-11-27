@@ -4,7 +4,7 @@
   的 Chromium —— `canPlayType('video/mp4; codecs="avc1..."')` 返回空，<video> 报
   `DEMUXER_ERROR_NO_SUPPORTED_STREAMS`；而 VP8/VP9/AV1 正常。Wallpaper Engine 的
   场景壁纸里，人物层常常是 **H.264 的"视频贴图"**（.tex 里包着 MP4），于是整张壁纸
-  只剩黑底 —— 用户看到的"黑屏"。
+  只剩黑色背景。
 
 ★ 做法：把每个视频 .tex 的 MP4 载荷转成 **VP9-in-MP4**（Chromium 认这个），
   保留 .tex 头部不动（头部第 12 字节处声明的是"贴图类型"，与视频编码无关），
@@ -26,9 +26,8 @@ from typing import Callable, List, Optional, Tuple
 
 from . import wallpaper_engine as _we
 
-#: 转码目标高度：**取显示器高度**（再高也没有意义 —— 画面最后就是铺在这个屏幕上）。
-#: ★ 2026-11-18 用户明确要求"不要为了性能砍画质"：之前固定 720p 是错的，
-##  现在按屏幕转码，最终画面与源一致，而像素量比 4K 少一半以上。
+#: 转码以显示器高度为目标。固定 720p 会降低高分辨率显示器上的画质，
+#: 按屏幕高度转码可兼顾清晰度和渲染负载。
 DEFAULT_TARGET_HEIGHT = 1080
 #: 转码后帧率：跟源一致（不降帧，动作观感不变）
 TARGET_FPS = 60

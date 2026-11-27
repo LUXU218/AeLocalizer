@@ -77,8 +77,8 @@ def _baseline_path(data_root: str) -> str:
 def version_of(ae_root: str) -> str:
     """从 AE 安装路径取版本号("...Adobe After Effects 2025" -> "2025")。
 
-    ★ 基线必须按版本分开存:老实现是全局单份,信任 2026 之后 2021~2025
-      全部被判"模块已被替换"而拒绝启动引擎(用户实测:只有 25/26 能进)。
+    可信模块基线按 AE 版本分开存储。全局共用一份会把其他 AE 版本的模块
+    误判为被替换并阻止引擎启动。
     """
     m = re.search(r"After Effects (\d{4})", ae_root or "")
     return m.group(1) if m else ""

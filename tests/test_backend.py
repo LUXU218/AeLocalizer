@@ -34,9 +34,7 @@ class TestBackend(unittest.TestCase):
       这里原来直接 AppBackend()，而它用的是【真实】的
       %LOCALAPPDATA%\\AeLocalizer 目录 —— 于是后面那条
           self.b.setAiKey("sk-1234567890abcd")
-      把用户真实的 API Key（DPAPI 密文）覆盖成了测试用的假 key！
-      用户感受就是「退出重进密钥就被自动替换」，
-      因为每跑一次测试就写一次假 key。
+      测试每次运行会用测试密钥覆盖默认数据目录中的 DPAPI 密文。
 
       现在：把 backend 模块级的 DATA_ROOT 指向临时目录，
       store.json / settings.json / ai_key.dat / selection-*.json
@@ -191,11 +189,9 @@ class TestBackend(unittest.TestCase):
         self.b.setAiKey("")
 
     def test_empty_key_does_not_wipe_saved_key(self):
-        """★ 用户报障回归：空输入绝不能把磁盘上已保存的 Key 冲掉。
+        """空输入失焦时保留磁盘上已保存的密钥。
 
-        现场：QML 的 TextInput.onEditingFinished 在任何失焦时都调
-        setAiKey(text)，而输入框平时是空的 —— 于是"点一下输入框再点别处"
-        就会把 Key 清掉，用户看到的就是「Key 突然没用了」。
+        TextInput.onEditingFinished 可能将空串交给 setAiKey，验证已有密文得到保留。
         """
         from core import secrets
 
@@ -207,7 +203,7 @@ class TestBackend(unittest.TestCase):
         self.b.setAiKey("sk-keepme-1234567890")  # 复原内存
 
     def test_key_survives_restart(self):
-        """★ 用户报障回归：退出重进后 Key 必须还在、还能用。"""
+        """已保存的密钥可在重新启动后读取。"""
         from app.backend import AppBackend
         from core import secrets
 
@@ -438,10 +434,8 @@ class TestRun(unittest.TestCase):
 class TestLaunchAeAsync(unittest.TestCase):
     """「启动 AE」必须后台跑，不能卡住界面。
 
-    ★ 2026-10-30 用户报「每次进入 AE 都要很久」：AE 冷启动实测就要 10 秒以上
-      （Adobe 自身开销，见 docs/兼容性-AE2021-2023.md §8），而 launchAE() 原来
-      是同步 Slot —— 这 10 秒里 QML 主线程完全卡死，用户看到的是界面假死。
-      现在改成 Worker 后台线程：立即返回 + 就绪后 toast。
+    AE 冷启动实测超过 10 秒（见 docs/兼容性-AE2021-2023.md §8）。
+    用后台线程启动，让 QML 主线程立即返回，并在 AE 就绪后发出提示。
     """
 
     def test_launch_ae_returns_immediately(self):
@@ -485,11 +479,8 @@ class TestLaunchAeAsync(unittest.TestCase):
 class TestLiveWatch(unittest.TestCase):
     """效果名通道常驻补写（2026-11-01）。
 
-    ★ 起因（用户报「明明勾了效果名,但 AE 里效果名没汉化」）：开关状态是
-      持久的（存选区文件），注册表写入却是一次性的 —— 只在点击开关那一刻
-      执行，AE 一重启就没了；应用重启后 _inv 为 None 时点击还会被
-      setChannelAuto 静默吞掉。修复 = 启动静默预扫 + 8 秒一拍的常驻补写。
-      此处锁定接线：沙盒闸 / 会话记账 / 开关完整链 / 清单未就绪不炸。
+    持久化开关状态会在重启时恢复，一次性写入的注册表名称不会。
+    启动时预扫清单并定期补写。清单未就绪时仍须正确处理开关与会话状态。
     """
 
     def setUp(self):

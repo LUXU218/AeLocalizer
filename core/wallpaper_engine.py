@@ -860,7 +860,7 @@ def _wproperties_branch(obj: dict):
 def _entry_key(wp: dict, entry_path: str):
     """在 wproperties 里找这张壁纸的键 —— **大小写/斜杠不敏感**。
 
-    ★★ 2026-11-17 修（用户「点了没反应 / 要能立刻刷新」的真因）：
+    使用相同键读写属性，确保场景参数可以刷新：
       WE 自己的键可能是 ``D:/SteamLibrary/...``，而 Steam 库路径返回的盘符可能小写。
       早先直接拿 ``os.path.abspath`` 的结果当键，于是在同一份
       config.json 里造出一个**只差大小写的重复键**：WE 永远只读它自己那个键，
