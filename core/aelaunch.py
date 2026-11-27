@@ -175,7 +175,7 @@ def _click(hwnd: int) -> bool:
 def _click_modal(hwnd: int) -> bool:
     """点「自绘对话框」右下角的按钮。
 
-    ★ 2026-10-30 用户报「多添加几个效果就跳报错」时实测：
+    2026-10-30 实测：
       AE 的提示框（#32770 + Adobe DirectUI 子窗口 DroverLord）**对合成按键
       完全无反应** —— PostMessage(WM_KEYDOWN)、keybd_event(VK_RETURN)、
       PostMessage(BM_CLICK) 全都无效，而且 EnumChildWindows 读不到按钮文字
@@ -230,8 +230,7 @@ def dismiss_dialogs(verbose: bool = False) -> int:
 
     ★★ 2026-10-22 安全规则：
       Windows 的「程序未响应」框有 [关闭程序] [等待程序响应] 两个按钮，
-      默认按钮常是「关闭程序」—— 直接发回车会把 AE 杀掉
-      （用户看到的就是"AE 图标闪一下就没了"）。
+      默认按钮常是「关闭程序」，发送回车可能直接终止 AE。
       所以这类框必须精确点「等待」，找不到就完全不动。
     """
     _WAIT = ("等待程序响应", "等待程序回應", "Wait for the program to respond")
@@ -353,8 +352,7 @@ def nudge_redraw(pid: int = 0, hwnd: int = 0, shots_dir: str = "",
     ★ 2026-11-07 真机结论（挨个试过，别回退）：
       - RedrawWindow / PostMessage(WM_MOUSEMOVE、WM_KEYDOWN) 一律无效：
         AE 面板是 D3D 自绘，只认**真实输入队列**事件。
-      - SetCursorPos 扫视 + keybd_event 切图层确实能刷新，但光标会动、
-        界面会闪，用户明确不要（「不想要用鼠标去…闪一下很奇怪」）。
+      - 移动光标或切图层虽然能刷新，但会造成指针移动和界面闪动。
       - 改成**零位移** mouse_event：事件真实进输入队列，位移为 0
         （光标不动），且只在光标本来就在 AE 窗口里时发 —— 视觉上无感。
     """
@@ -541,8 +539,7 @@ def launch_ae(exe: str = "", timeout: float = 25.0,
     #   ① Mocha / Imagineer 的许可证框（OS_ViewContainer，标题为空）
     #      实测能挡 45~60 秒，用户以为 AE 死了
     #   ② Windows 的「程序未响应」框
-    #      ★ 默认按钮是「关闭程序」，点错就把 AE 杀了
-    #      用户看到的就是"AE 图标闪一下就没了"
+    #      默认按钮可能是「关闭程序」，按回车可能终止 AE。
     #   这里在等待期间持续自动处理它们（只点「等待」，绝不点「关闭」）。
     handled = 0
     try:

@@ -46,11 +46,8 @@ class PluginGroup:
     vendor: str = ""
     files: List[PluginInfo] = field(default_factory=list)
     selected: bool = False
-    # ★ 2026-11-02:效果名通道默认【关】(参数+下拉默认开)。用户实测:
-    #   「我都没有开效果名称汉化但是却汉化了」—— 分组通道默认 ALL 让
-    #   效果名跟着参数一起默认生效,用户没主动开过也从不曾关过,违背直觉。
-    #   效果名改 .aex PiPL 属于深度改写,应当显式选择;要开就用引擎卡
-    #   效果名开关(setAllChannels 会批量写回选区并持久化)。
+    # 参数和下拉默认开启。将全部通道设为默认值会误启用效果名汉化。
+    # 效果名通道涉及 PiPL 写入，需显式开启。setAllChannels 批量保存选择。
     channels: Tuple[str, ...] = (CH_PARAM, CH_ENUM)
 
     @property
@@ -366,10 +363,8 @@ def apply_mode(inv: Inventory, mode: str) -> None:
 def set_all_channels(inv: Inventory, effect: bool, param: bool, enum: bool) -> int:
     """效果名独立；param/enum 作为合并语言通道一起套用到所有组。
 
-    ★ 2026-10-23 用户要求把插件选择并进翻译页，左栏空间只够放
-      「效果名 / 参数名 / 下拉值」三个小开关，不能再像原来那样每组
-      各有一组开关（三通道 × 66 组 = 198 个控件的视觉噪音）。
-      改成全局一次设定，需要单独微调的组再去原「插件」Tab 里点。
+    翻译页使用全局通道开关，避免每组重复放置三套控件。
+    需要单独调整时可在插件分组设置中操作。
     """
     ch = []
     if effect:

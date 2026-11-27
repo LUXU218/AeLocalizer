@@ -282,10 +282,8 @@ $Bak = "$TargetDir.old-" + [Guid]::NewGuid().ToString('N')
 $BackedUp = $false
 $TargetCreated = $false
 
-# ★★ 2026-11-19 用户实测：更新后"要自己重启、版本也没变"。
-#   真因是 PowerShell 继承了程序的当前目录（就在 $AppDir 里），
-#   而 Windows 不允许重命名**自己的当前目录** → Rename-Item 失败 → 回滚 → 什么都没做成。
-#   所以脚本第一步就切到临时目录，再动程序目录。
+# Windows 无法重命名进程自己的当前目录。更新脚本若继承旧程序目录，
+# Rename-Item 会失败并回滚。先切到临时目录，再替换程序文件。
 Set-Location -LiteralPath $env:TEMP
 
 function Log($m) {{

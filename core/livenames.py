@@ -107,8 +107,8 @@ def fit_name(text: str, encoding: str, max_bytes: int) -> str:
     """把放不下的译文收进 max_bytes 字节。
 
     显示名字段只有 48 字节（含终止 NUL），而词典里确实有描述性长句被当成
-    效果名（例：BCC 2D Particles 的译文长达 77 字节）。原实现只能整条放弃，
-    用户看到的就是「有的效果名还是英文」。这里按两步收口：
+    效果名（例如 BCC 2D Particles 的译文有 77 字节）。过长的译名无法直接写入，
+    依次尝试提取名称主干和按字段上限缩短：
 
       1. 主干优先：取第一个中文标点前的部分（「BCC 平面粒子系统，可发射…」
          → 「BCC 平面粒子系统」），语义最完整；
@@ -410,7 +410,7 @@ class NameSession:
                     continue
                 if fitted != text:
                     # 超长译名按标点/前缀收口后照写,不再整条退回英文 ——
-                    # 回退英文正是用户看到的「部分效果名没汉化」。
+                    # 写入失败时回退原文，避免影响同批其他效果。
                     shortened[key] = fitted
                 encoded[key] = encode_name(fitted, encoding)
             problem = None

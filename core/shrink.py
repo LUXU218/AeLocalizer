@@ -47,8 +47,8 @@ _MIN_ASCII = 3
 
 def _is_junk(cand, original):
     # 判断缩短候选是不是垃圾（2026-10-22 实测问题）
-    # 现象: BCC Blur Dslv（13字节）的译文 BCC 模糊溶解 16字节，
-    #       逐字截断最后给出 BC，用户看到一堆 BC 完全不知道是什么。
+    # BCC Blur Dslv 的字段容纳 13 字节，16 字节的译文直接截断可能只剩 BC。
+    # 拒绝这种失去名称辨识度的缩短结果。
     if not cand:
         return True
     if cand.isascii():
@@ -69,9 +69,7 @@ def gbk_len(s: str) -> Optional[int]:
 
 
 def _split_vendor(zh):
-    # 拆成 (厂商前缀, 其余)。前缀【原样保留】绝不删。
-    # 2026-10-22 用户要求：BCC/CC/Sapphire 这些厂商名必须留着，
-    # 否则界面上只剩模糊溶解，根本不知道是哪个厂商的效果。
+    # 保留 BCC、CC 和 Sapphire 等厂商前缀，以便识别效果来源。
     for p in VENDOR_PREFIXES:
         if zh.startswith(p):
             return p, zh[len(p):]

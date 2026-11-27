@@ -247,7 +247,7 @@ class TestBackendDict(unittest.TestCase):
         self.assertEqual(self.b.copySelectedNamePairs(), "")
 
     def test_copy_selected_translations(self):
-        """译名列框选复制：一行一个中文（2026-10-27 用户要求）。"""
+        """框选中文译名后按显示顺序复制，每行一个。"""
         from core.nameeditor import NameRow
 
         self.b._nameModel.setRows([
@@ -293,7 +293,7 @@ class TestBackendDict(unittest.TestCase):
             self.b._nameModel.setFilter("")
             self.b.clearNameSelection()
 
-    # ---------------- 批量写入（2026-10-25 用户要求） ----------------
+    # ---------------- 批量写入 ----------------
 
     def _two_rows(self):
         from core.nameeditor import NameRow
@@ -334,7 +334,7 @@ class TestBackendDict(unittest.TestCase):
             self.b.clearNameSelection()
 
     def test_batch_write_pure_english_becomes_selection(self):
-        """纯英文名单不再被拒绝 —— 转成按名单勾选（2026-10-25 用户反馈）。"""
+        """只粘贴英文名字时，按名单匹配并勾选对应行。"""
         self._two_rows()
         self.b.clearNameSelection()
         msg = self.b.batchWriteNames("A One\nB Two")
@@ -512,7 +512,7 @@ class TestBackendDict(unittest.TestCase):
                 self.b._nameModel.index(i, 0), ROLES["zh"]), "旧")
         finally:
             self.b._nameModel.setFilter("")
-        # 取消筛选后 A One 必须是新值（以前这里还是旧值 -> 用户看到"没变化"）
+        # 取消筛选后 A One 保持更新后的译名。
         zm = self.b._nameModel.zhMap()
         self.assertEqual(zm["A One"], "新")
         self.assertEqual(zm["B Two"], "旧")
