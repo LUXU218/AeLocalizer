@@ -333,6 +333,7 @@ class LanguageEngine:
         self.popup = None
         self.host = None
         self.mapping = {}
+        self._mapping_cache = None
         self.last_error = ""
         self.popup_reasons = {}
         self.popup_unsupported = 0
@@ -454,18 +455,41 @@ class LanguageEngine:
     def _map(self):
         try:
             path = os.path.join(self.engine_dict, "extra_overrides.json")
-            with open(path, encoding="utf-8") as f:
-                obj = json.load(f)
+            with open(path, "rb") as f:
+                base_bytes = f.read()
+            try:
+                with open(os.path.join(self.engine_dict, "scoped_popup.json"), "rb") as f:
+                    scoped_bytes = f.read()
+            except OSError:
+                scoped_bytes = None
+
+            # Compare the bytes actually read. Replacements and same-size edits
+            # can preserve timestamps, and unreadable files must be retried.
+            sources = (base_bytes, scoped_bytes)
+            if self._mapping_cache is not None and sources == self._mapping_cache[0]:
+                return self._mapping_cache[1], ""
+            obj = json.loads(base_bytes.decode("utf-8"))
             if not isinstance(obj, dict):
                 return {}, "not-dict"
             mapping = {str(k): str(v) for k, v in obj.items() if k and v and "\x1f" not in k}
-            scoped = _read_json(os.path.join(self.engine_dict, "scoped_popup.json"))
+            scoped = None
+            if scoped_bytes is not None:
+                try:
+                    scoped = json.loads(scoped_bytes.decode("utf-8"))
+                except ValueError:
+                    # Use the general dictionary for this tick; retry the
+                    # optional document before trusting a combined snapshot.
+                    sources = None
             if isinstance(scoped, dict):
                 for key, value in list(scoped.items())[:3000]:
                     if (len(key.split("\x1f")) == 3 and all(key.split("\x1f"))
                             and isinstance(value, str) and 0 < len(value) <= 120
                             and not any(c in value for c in "|\n\r\x00\x1f")):
                         mapping[key] = value
+            if mapping == self.mapping:
+                mapping = self.mapping
+            if sources is not None:
+                self._mapping_cache = (sources, mapping)
             return mapping, ""
         except Exception as exc:
             return {}, "map-read:%s" % str(exc)[:120]
@@ -480,7 +504,7 @@ class LanguageEngine:
             return False
         # Valid empty JSON is a real "no translations" payload: publish it and
         # clear the cache. Only read/parse errors preserve the last good map.
-        changed = new != self.mapping
+        changed = new is not self.mapping
         self.mapping = new
         self.map_error = ""
         self.draw_error = ""
@@ -804,10 +828,10 @@ class LanguageEngine:
     def refresh(self, mode):
         """Periodically pick up new popup streams/dictionary updates while ON."""
         try:
-            old_map = dict(self.mapping)
+            old_map = self.mapping
             if not self._refresh_mapping():
                 return False, "dictionary-unavailable:%s" % self.map_error
-            map_changed = self.mapping != old_map
+            map_changed = self.mapping is not old_map
             display_only = bool(getattr(self.popup, "display_only", False))
             if map_changed and (display_only or self.popup is None) and self.host:
                 _redraw_host(int(self.host["pid"]), attempts=1)

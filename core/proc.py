@@ -341,7 +341,8 @@ def module_digest(p: Process, path) -> str:
     with _lock:
         digest = _digests.get(key)
     if digest is None:
-        digest = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+        with Path(path).open("rb") as stream:
+            digest = hashlib.file_digest(stream, "sha256").hexdigest()
         with _lock:
             _digests[key] = digest
     return digest

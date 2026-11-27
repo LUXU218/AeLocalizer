@@ -316,6 +316,49 @@ class ParadeRescanScheduleTest(unittest.TestCase):
 
 
 class RowsRefreshTest(unittest.TestCase):
+    def test_cached_name_check_stops_after_visible_prefix_and_reloads_on_visible_miss(self):
+        class Row(dict):
+            parent_reads = 0
+
+            def __getitem__(self, key):
+                if key == "parent":
+                    self.parent_reads += 1
+                return super().__getitem__(key)
+
+        p = _Proc()
+        profile = types.SimpleNamespace(match_pool=1, flt_sha="f", tdb_sha="t")
+        names_key = (p.pid, p.creation_time, "f", "t", 1)
+        visible = Row(parent=1, matchName="param", effectMatchName="effect")
+        background = [Row(parent=2, matchName="", effectMatchName="") for _ in range(8)]
+        catalog = types.SimpleNamespace(profile=profile, names={})
+        catalog.rows = lambda **kwargs: [*background, visible]
+
+        def reload_names():
+            visible["matchName"] = "new name"
+            return {}
+
+        catalog.match_pool = mock.Mock(side_effect=reload_names)
+        with mock.patch.object(pd, "_POPUP_NAMES", {names_key: {}}), \
+             mock.patch.object(pd, "_PARADE_CACHE", {}), \
+             mock.patch.object(pd, "Registry", return_value=types.SimpleNamespace(profile=profile)), \
+             mock.patch.object(pd, "profile_with_pool", return_value=profile), \
+             mock.patch.object(pd, "ParameterCatalog", return_value=catalog), \
+             mock.patch.object(pd, "_visible_parades", return_value=({5}, {1})), \
+             mock.patch.object(pd, "_valid_parade", return_value=True):
+            _, rows, _, pending = pd.parameter_rows(
+                p, None, with_state=True, visible_streams=(10,), popup_ownership=True)
+            self.assertTrue(pending)
+            self.assertEqual(rows, [visible, *background])
+            # Each later background row participated only in the stable sort.
+            self.assertEqual([r.parent_reads for r in background[1:]], [1] * 7)
+            catalog.match_pool.assert_not_called()
+
+            visible["matchName"] = ""
+            _, rows, _, _ = pd.parameter_rows(
+                p, None, with_state=True, visible_streams=(10,), popup_ownership=True)
+            catalog.match_pool.assert_called_once_with()
+            self.assertEqual(rows[0]["matchName"], "new name")
+
     def test_new_visible_stream_bypasses_heap_discovery_and_revalidates_owners(self):
         import dataclasses
 

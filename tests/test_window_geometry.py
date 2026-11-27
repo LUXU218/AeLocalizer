@@ -10,13 +10,15 @@ from PySide6.QtTest import QTest
 
 
 class WindowGeometryTest(unittest.TestCase):
-    def load_window(self, work_area):
+    def load_window(self, work_area, backend=None):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         app = QGuiApplication.instance() or QGuiApplication([])
         qml = Path(__file__).resolve().parents[1] / "app" / "qml"
         engine = QQmlApplicationEngine()
         engine.addImportPath(str(qml))
         engine.rootContext().setContextProperty("initialWindowWorkArea", work_area)
+        if backend is not None:
+            engine.rootContext().setContextProperty("appBackend", backend)
         engine.load(QUrl.fromLocalFile(str(qml / "main.qml")))
         self.assertTrue(engine.rootObjects())
         window = engine.rootObjects()[0]
@@ -25,6 +27,70 @@ class WindowGeometryTest(unittest.TestCase):
         self.addCleanup(engine.deleteLater)
         self.addCleanup(window.hide)
         return app, engine, window
+
+    def test_background_action_close_and_stop_are_distinct(self):
+        from tempfile import TemporaryDirectory
+        from unittest.mock import patch
+        from PySide6.QtCore import Slot
+        from app import backend as backend_mod
+
+        class Probe(backend_mod.AppBackend):
+            ready = False
+
+            @Slot(result=bool)
+            def requestWindowClose(self):
+                calls.append("close")
+                return self.ready
+
+            @Slot()
+            def stopEngine(self):
+                calls.append("stop")
+
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        app = QGuiApplication.instance() or QGuiApplication([])
+        calls = []
+        with TemporaryDirectory() as profile, patch.dict(os.environ, {"AELOC_DATA_ROOT": profile}), \
+                patch.object(backend_mod, "DATA_ROOT", profile), \
+                patch.object(backend_mod.engine, "check", return_value=backend_mod.engine.EngineStatus(running=True)), \
+                patch.object(backend_mod.engine, "control_status", return_value={"mode": "on", "language_ready": True}), \
+                patch.object(backend_mod.engine, "profile_runtime_confirmed", return_value=True):
+            backend = Probe()
+            backend._effWant = False
+            backend._langWant = True
+            backend._reopenedBackground = True
+            _app, _engine, window = self.load_window(QRect(0, 0, 1024, 704), backend)
+            backend.panelLocalization._busy = True
+            self.assertFalse(window.close())
+            self.assertEqual(window.property("pageIndex"), 5)
+            self.assertFalse(calls)
+            backend.panelLocalization._busy = False
+            window.setProperty("pageIndex", 4)
+            action = window.findChild(QQuickItem, "runInBackgroundAction")
+            self.assertTrue(action.isVisible())
+            # Windows treats the title bar to the left of the controls as a drag target.
+            self.assertGreaterEqual(action.mapToScene(QPointF()).x(), window.property("titleBarButtonsLeft"))
+            action.forceActiveFocus(Qt.TabFocusReason)
+            QTest.keyClick(window, Qt.Key_Space)
+            self.assertEqual(calls, ["close"])
+            self.assertTrue(window.isVisible())
+
+            window.setProperty("pageIndex", 2)
+            stop = window.findChild(QQuickItem, "engineStopAction")
+            stop.forceActiveFocus(Qt.TabFocusReason)
+            QTest.keyClick(window, Qt.Key_Space)
+            self.assertEqual(calls, ["close", "stop"])
+            self.assertTrue(window.isVisible())
+
+            backend.ready = True
+            self.assertTrue(window.close())
+            self.assertEqual(calls, ["close", "stop", "close"])
+            window.show()
+            backend._langWant = False
+            backend.stateChanged.emit()
+            app.processEvents()
+            self.assertFalse(action.isVisible())
+            self.assertTrue(window.close())
+            self.assertEqual(calls, ["close", "stop", "close", "close"])
 
     def test_window_starts_inside_small_desktop_with_all_resize_edges(self):
         # Include a nonzero origin, as on a secondary screen or with a side dock.
@@ -127,6 +193,16 @@ class WindowGeometryTest(unittest.TestCase):
                     previous = color.alpha()
             theme.setProperty("bgImage", "")
             self.assertEqual(tint.property("color").alpha(), 255)
+
+    def test_settings_are_created_on_first_visit_and_kept_across_navigation(self):
+        _app, _engine, window = self.load_window(QRect(0, 0, 1200, 800))
+        self.assertIsNone(window.findChild(QQuickItem, "wallpaperSettings"))
+        window.setProperty("pageIndex", 4)
+        card = window.findChild(QQuickItem, "wallpaperSettings")
+        self.assertIsNotNone(card)
+        window.setProperty("pageIndex", 3)
+        window.setProperty("pageIndex", 4)
+        self.assertEqual(window.findChild(QQuickItem, "wallpaperSettings"), card)
 
     def test_inactive_panels_allocate_no_wallpaper_sampling_textures(self):
         _app, _engine, window = self.load_window(QRect(0, 0, 1200, 800))

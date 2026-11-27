@@ -279,7 +279,9 @@ class ModuleTools:
         if file_version(self.exe) != self.version:
             raise ValueError("分析期间 AE 版本发生变化")
         for m in self.modules.values():
-            if hashlib.sha256(m["path"].read_bytes()).hexdigest() != m["sha256"]:
+            with m["path"].open("rb") as stream:
+                digest = hashlib.file_digest(stream, "sha256").hexdigest()
+            if digest != m["sha256"]:
                 raise ValueError("分析期间模块发生变化")
 
     def complete_static(self, host_version: str):

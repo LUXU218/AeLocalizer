@@ -155,6 +155,46 @@ class TestBackendDict(unittest.TestCase):
         self.assertEqual(e.zh, "模糊量")
         self.assertEqual(e.layer, "builtin")
 
+    def test_release_dictionary_rebuilds_current_rows_and_preserves_saved_edits(self):
+        from tempfile import TemporaryDirectory
+        from unittest.mock import patch
+
+        import app.backend as backend_mod
+        from app.dictmodel import ROLES
+        from core.dictstore import DictStore
+
+        with (TemporaryDirectory() as tmp,
+              patch.object(backend_mod, "DATA_ROOT", tmp),
+              patch.object(backend_mod, "find_ae_installs", return_value=[]),
+              patch.object(backend_mod.engine, "check", return_value=backend_mod.engine.EngineStatus()),
+              patch.object(backend_mod.engine, "background_language_session", return_value=None)):
+            backend = backend_mod.AppBackend()
+            backend._store.set_builtin({"Blur Radius": "模糊半径", "Display Mode": "显示模式"})
+            model = backend.dictModel
+            backend.refreshDict()
+            backend.filterDict("Radius")
+            self.assertEqual(model.rowCount(), 1)
+            with patch.object(backend, "_hot_reload_notify"):
+                self.assertTrue(backend.saveDictEntry("Blur Radius", "模糊距离").startswith("已保存"))
+            saved_path = Path(tmp, "store.json")
+            saved_bytes = saved_path.read_bytes()
+            revision = backend._store.revision
+
+            backend.release_workspace_dictionary()
+            self.assertEqual(model.rowCount(), 0)
+            self.assertIsNone(backend._store._resolution_cache)
+            self.assertEqual(backend._store.revision, revision)
+            self.assertEqual(backend._store.lookup("Blur Radius").zh, "模糊距离")
+            self.assertEqual(model.rowCount(), 0)
+
+            self.assertIn("共 2 条", backend.refreshDict())
+            self.assertEqual(model.rowCount(), 2)
+            row = model.index(model.indexOfEn("Blur Radius"), 0)
+            self.assertEqual(model.data(row, ROLES["zh"]), "模糊距离")
+            self.assertEqual(model.data(row, ROLES["layer"]), "user_locked")
+            self.assertEqual(saved_path.read_bytes(), saved_bytes)
+            self.assertEqual(DictStore.load(str(saved_path)).lookup("Blur Radius").zh, "模糊距离")
+
     def test_clear_user_created_entry_removes_row(self):
         self.b.saveDictEntry("Only Mine", "我的词条")
         self._refresh()

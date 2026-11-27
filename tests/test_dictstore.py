@@ -1,5 +1,6 @@
 """分层词典仓库测试：优先级 / 冲突 / 导入预览 / 持久化。"""
 import base64
+import json
 import os
 import sys
 import tempfile
@@ -199,6 +200,41 @@ class TestDictStore(unittest.TestCase):
     def test_load_missing_is_empty(self):
         st = DictStore.load(os.path.join(tempfile.mkdtemp(), "nope.json"))
         self.assertEqual(st.resolve(), {})
+
+    def test_pack_metadata_round_trips_across_load_edit_save(self):
+        entries = {
+            "A": {"zh": "甲"},
+            "B": {"zh": "乙", "priority": 0, "note": "同一来源"},
+            "C": {"zh": "丙", "priority": 10, "note": "同一来源"},
+            "D": {"zh": "丁", "note": None},
+            "E": {"zh": "戊", "note": ["一", "二"], "custom": {"enabled": True}},
+        }
+        st = DictStore()
+        st.import_pack(_pack(entries))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp, "store.json")
+            st.save(str(path))
+            loaded = DictStore.load(str(path))
+            loaded.upsert_user("A", "修改", locked=True)
+            self.assertEqual(loaded.lookup("A").zh, "修改")
+            self.assertEqual(loaded.lookup("B").priority, 0)
+            self.assertEqual(loaded.lookup("D").priority, 50)
+            loaded.save(str(path))
+            saved = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["packs"][0]["data"], entries)
+
+    def test_disabled_legacy_pack_retains_unresolved_records(self):
+        entries = {"missing": {}, "empty": None, "nested": {"zh": None, "unknown": [1, 2]}}
+        obj = {"schema": "aeloc-store/1", "builtin": {"Good": "正常"},
+               "packs": [{"id": "legacy", "enabled": False, "data": entries}]}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp, "store.json")
+            path.write_text(json.dumps(obj), encoding="utf-8")
+            st = DictStore.load(str(path))
+            self.assertEqual(list(st.resolve()), ["Good"])
+            st.save(str(path))
+            saved = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["packs"][0]["data"], entries)
 
 
 if __name__ == "__main__":

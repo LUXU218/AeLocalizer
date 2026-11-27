@@ -48,6 +48,7 @@ class SettingsUiMixin:
     bgChanged = Signal()
     #: 个性化项(强调色/密度/字号/动效/底板)变了 —— QML 收到后灌进 Theme 单例
     appearanceChanged = Signal()
+    startupWithAeChanged = Signal()
 
     # ---------------------------------------------------------- 设置页（主题 / 更新）
 
@@ -406,6 +407,20 @@ class SettingsUiMixin:
         self._plate = v
         self._saveUiSettings()
         self.appearanceChanged.emit()
+
+    @Property(bool, notify=startupWithAeChanged)
+    def startupWithAe(self):
+        from core import windows_startup
+        return windows_startup.is_enabled(_data_root())
+
+    @Slot(bool)
+    def setStartupWithAe(self, enabled):
+        from core import windows_startup
+        try:
+            windows_startup.set_enabled(enabled, _data_root())
+        except (OSError, ValueError) as exc:
+            self.toast.emit("warn", str(exc))
+        self.startupWithAeChanged.emit()
 
     @Property(bool, notify=appearanceChanged)
     def autoScan(self):

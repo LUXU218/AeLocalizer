@@ -9,6 +9,7 @@ from __future__ import annotations
 import dataclasses
 import struct
 import time
+from itertools import takewhile
 
 from .livenames import Registry
 from .paramcatalog import ParameterCatalog, bounded_ascii
@@ -312,8 +313,11 @@ def parameter_rows(p, data_root, deadline=None, cancel=None,
     rows = cat.rows(popup_ownership=True) if popup_ownership else cat.rows()
     if roots:
         rows.sort(key=lambda row: row["parent"] not in roots)
-        if previous_names is not None and any(row["parent"] in roots and
-                not (row["matchName"] and row["effectMatchName"]) for row in rows):
+        # The stable sort put all visible rows first; background rows cannot
+        # trigger a name-table refresh for the current view.
+        visible_rows = takewhile(lambda row: row["parent"] in roots, rows)
+        if previous_names is not None and any(
+                not (row["matchName"] and row["effectMatchName"]) for row in visible_rows):
             cat.names = cat.match_pool()
             rows = cat.rows(popup_ownership=True)
             rows.sort(key=lambda row: row["parent"] not in roots)

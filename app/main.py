@@ -57,12 +57,6 @@ def _setup_diagnostics() -> None:
         except Exception:
             pass
         _log("数据目录 %s" % root)
-        try:
-            import frida as _frida
-
-            _log("frida %s (%s)" % (getattr(_frida, "__version__", "?"), _frida.__file__))
-        except Exception as exc:
-            _log("frida 不可用：%s ← 守卫无法加载实时汉化依赖" % exc)
         _log_modules()
     except Exception:
         pass
@@ -147,34 +141,22 @@ _DEPS_DIR = os.path.join(ROOT, ".runtime-deps")
 if os.path.isdir(_DEPS_DIR) and _DEPS_DIR not in sys.path:
     sys.path.insert(0, _DEPS_DIR)
 
-from PySide6.QtCore import QAbstractNativeEventFilter, QUrl, Qt, QTimer
-from PySide6.QtGui import QGuiApplication
-from PySide6.QtQml import QQmlApplicationEngine
-from PySide6.QtQuick import QQuickWindow
-
 QML_DIR = os.path.join(HERE, "qml")
 
 
-def _init_web_engine() -> bool:
-    """初始化 QtWebEngine（可选依赖 PySide6-WebEngine）。
-
-    ★ 必须在 QGuiApplication 之前：`AA_ShareOpenGLContexts` 是进程级属性，
-      `QtWebEngineQuick.initialize()` 也要求在应用对象创建前调用。
-    ★ 没装就返回 False —— 场景壁纸退回「提取画面」，界面照常启动。
-      可用性通过环境变量传给 backend（QML 侧只看 backend.webEngineAvailable）。
-    """
+def _prepare_web_engine() -> bool:
+    """Prepare shared graphics before creating the GUI. Scene selection loads WebEngine."""
     # 兼容模式：三方叠加层导致闪退时，可用 AELOC_NO_WEBENGINE=1 跳过 WebEngine
     if os.environ.get("AELOC_NO_WEBENGINE", "") == "1":
         os.environ["AELOC_WEBENGINE"] = "0"
         return False
     try:
-        from PySide6.QtWebEngineQuick import QtWebEngineQuick  # noqa: F401
-    except Exception:
-        os.environ["AELOC_WEBENGINE"] = "0"
-        return False
-    try:
+        from importlib.util import find_spec
         from PySide6.QtCore import QCoreApplication, Qt
 
+        if find_spec("PySide6.QtWebEngineQuick") is None:
+            os.environ["AELOC_WEBENGINE"] = "0"
+            return False
         # ★ 2026-11-18 性能：把 Chromium 里与"把画面搬到 QML 里"相关的开关打开。
         #   全是不改画质的性能项：
         #   零拷贝合成（视频帧直接进合成器）、GPU 光栅化、忽略驱动黑名单
@@ -184,8 +166,8 @@ def _init_web_engine() -> bool:
                 "--ignore-gpu-blocklist --enable-accelerated-video-decode")
         if "--enable-zero-copy" not in base:
             os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = (base + " " + want).strip()
+        # With the pinned Qt 6.12, QtWebEngineQuick.initialize() is a no-op.
         QCoreApplication.setAttribute(Qt.AA_ShareOpenGLContexts)
-        QtWebEngineQuick.initialize()
         os.environ["AELOC_WEBENGINE"] = "1"
         return True
     except Exception:
@@ -193,101 +175,9 @@ def _init_web_engine() -> bool:
         return False
 
 
-def _add_import_path(engine: QQmlApplicationEngine) -> None:
+def _add_import_path(engine) -> None:
     """把 qml/ 目录加进导入路径，让 `import AeLocalizer` 能找到 Theme 单例。"""
     engine.addImportPath(QML_DIR)
-
-
-def _configure_windows_renderer(app: QGuiApplication) -> None:
-    if app.platformName() != "windows" or os.environ.get("QSG_RHI_BACKEND") or os.environ.get("QT_QUICK_BACKEND"):
-        return
-
-    from PySide6.QtGui import QOffscreenSurface, QOpenGLContext
-    from PySide6.QtQuick import QSGRendererInterface
-
-    context = QOpenGLContext()
-    if not context.create() or context.isOpenGLES() or context.format().majorVersion() < 3:
-        return
-
-    surface = QOffscreenSurface()
-    surface.setFormat(context.format())
-    surface.create()
-    if not surface.isValid() or not context.makeCurrent(surface):
-        return
-    try:
-        renderer = context.functions().glGetString(0x1F01)  # GL_RENDERER
-    finally:
-        context.doneCurrent()
-
-    software = ("gdi generic", "llvmpipe", "softpipe", "swiftshader", "software rasterizer", "basic render driver")
-    if renderer and not any(name in str(renderer).lower() for name in software):
-        QQuickWindow.setGraphicsApi(QSGRendererInterface.OpenGL)
-        _log("窗口渲染: 硬件 OpenGL (%s)" % renderer)
-
-
-class WindowsSizeMoveFilter(QAbstractNativeEventFilter):
-    def __init__(self, window):
-        super().__init__()
-        from ctypes import POINTER, WinDLL, c_int
-        from ctypes.wintypes import HWND, MSG, POINT, RECT, UINT
-
-        self.window = window
-        self.hwnd = window.winId()
-        self.message_type = MSG
-        self.point_type = POINT
-        self.rect_type = RECT
-        self.user32 = WinDLL("user32")
-        self.user32.ScreenToClient.argtypes = [HWND, POINTER(POINT)]
-        self.user32.GetWindowRect.argtypes = [HWND, POINTER(RECT)]
-        self.user32.GetDpiForWindow.argtypes = [HWND]
-        self.user32.GetDpiForWindow.restype = UINT
-        self.user32.GetSystemMetricsForDpi.argtypes = [c_int, UINT]
-
-    def client_hit(self, lparam):
-        from ctypes import byref, c_short
-
-        x = c_short(lparam & 0xffff).value
-        y = c_short((lparam >> 16) & 0xffff).value
-        point = self.point_type(x, y)
-        if not self.user32.ScreenToClient(self.hwnd, byref(point)):
-            return None
-        scale = self.window.devicePixelRatio()
-        local_x, local_y = point.x / scale, point.y / scale
-        if not (0 <= local_x < self.window.width()
-                and 0 <= local_y < self.window.height()):
-            return None
-
-        if self.window.windowState() == Qt.WindowNoState:
-            outer = self.rect_type()
-            if not self.user32.GetWindowRect(self.hwnd, byref(outer)):
-                return None
-            dpi = self.user32.GetDpiForWindow(self.hwnd)
-            padding = self.user32.GetSystemMetricsForDpi(92, dpi)  # SM_CXPADDEDBORDER
-            horizontal = self.user32.GetSystemMetricsForDpi(32, dpi) + padding  # SM_CXSIZEFRAME
-            vertical = self.user32.GetSystemMetricsForDpi(33, dpi) + padding  # SM_CYSIZEFRAME
-            if not (outer.left + horizontal <= x < outer.right - horizontal
-                    and outer.top + vertical <= y < outer.bottom - vertical):
-                return None
-
-        if (local_y < self.window.property("titleBarHeight")
-                and local_x < self.window.property("titleBarButtonsLeft")):
-            return 2  # HTCAPTION
-        # Skip Qt's synthesized mouse events for the custom frame inside the client area.
-        return 1  # HTCLIENT
-
-    def nativeEventFilter(self, event_type, message):
-        if event_type == b"windows_generic_MSG":
-            event = self.message_type.from_address(int(message))
-            if event.hWnd == self.hwnd:
-                if event.message == 0x0084:  # WM_NCHITTEST
-                    hit = self.client_hit(event.lParam)
-                    if hit is not None:
-                        return True, hit
-                elif event.message == 0x0231:  # WM_ENTERSIZEMOVE
-                    self.window.setProperty("windowResizing", True)
-                elif event.message == 0x0232:  # WM_EXITSIZEMOVE
-                    self.window.setProperty("windowResizing", False)
-        return False, 0
 
 
 def _find_qml_item(item, name: str, depth: int = 0):
@@ -313,6 +203,11 @@ def _find_qml_item(item, name: str, depth: int = 0):
 def _snapshot(path: str, index: int = 0, wait_ms: int = 2500, scan: bool = False,
               tab: int = -1) -> int:
     """无头渲染：加载界面、切到指定页/工作台 Tab、截图保存。"""
+    from PySide6.QtCore import QTimer, QUrl
+    from PySide6.QtGui import QGuiApplication
+    from PySide6.QtQml import QQmlApplicationEngine
+    from PySide6.QtQuick import QQuickWindow
+
     # 无头截图：软件渲染，场景实时渲染一律关掉（Chromium 起不来也不该起）
     os.environ["AELOC_WEBENGINE"] = "0"
     app = QGuiApplication(sys.argv)
@@ -399,7 +294,7 @@ def _snapshot(path: str, index: int = 0, wait_ms: int = 2500, scan: bool = False
 
 def main() -> int:
     # 守卫子进程由 engine 重定向 stdout/stderr 到引擎日志，这里不要再抢成 run.log
-    if "--run-guard" not in sys.argv[1:]:
+    if "--run-guard" not in sys.argv[1:] and sys.argv[1:] != ["--settings-workspace"]:
         _setup_diagnostics()
     try:
         return _main_inner()
@@ -573,6 +468,10 @@ def _self_check() -> int:
 
 def _main_inner() -> int:
     args = sys.argv[1:]
+    if args == ["--settings-workspace"]:
+        from app.settings_workspace import run_settings_workspace
+
+        return run_settings_workspace(QML_DIR)
     if "--self-check" in args:
         return _self_check()
     if "--run-guard" in args:
@@ -591,34 +490,91 @@ def _main_inner() -> int:
             tab = int(args[j + 1]) if j + 1 < len(args) else 0
         return _snapshot(path, index, scan="--scan" in args, tab=tab)
 
-    ok = _init_web_engine()
-    _log("WebEngine 初始化: %s" % ("可用" if ok else "不可用（降级为提取画面）"))
-    app = QGuiApplication(sys.argv)
+    from app.background_session import should_open_workspace
+    from core import windows_startup
+
+    automatic = "--from-ae-startup" in args
+    if automatic and not should_open_workspace(automatic=True):
+        return 0
+    lease = windows_startup.acquire_ui(automatic=automatic)
+    if lease is None:
+        if not automatic:
+            windows_startup.activate_ui()
+        return 0
+    try:
+        if not automatic:
+            should_open_workspace(automatic=False)
+        return _run_gui(lease)
+    finally:
+        lease.close()
+
+
+def _run_gui(lease) -> int:
+    from app.workspace_window import WorkspaceApplication, WorkspaceWindow
+
+    ok = _prepare_web_engine()
+    _log("场景渲染组件: %s" % ("按需加载" if ok else "不可用（降级为提取画面）"))
+    app = WorkspaceApplication(sys.argv)
     app.setApplicationName("AeLocalizer")
-    _configure_windows_renderer(app)
 
     from app.backend import AppBackend
 
+    app.setQuitOnLastWindowClosed(False)
     backend = AppBackend()
     app.aboutToQuit.connect(backend.shutdown)
-    engine = QQmlApplicationEngine()
-    _add_import_path(engine)
-    engine.rootContext().setContextProperty("appBackend", backend)
-    engine.rootContext().setContextProperty("useWindowsFrame", app.platformName() == "windows")
-    screen = app.primaryScreen()
-    if screen:
-        engine.rootContext().setContextProperty("initialWindowWorkArea",
-                                                screen.availableGeometry())
-    engine.load(QUrl.fromLocalFile(os.path.join(HERE, "qml", "main.qml")))
-    if not engine.rootObjects():
+    workspace = WorkspaceWindow(app, backend, lease, QML_DIR)
+    from core.engine import background_on_ae_startup
+
+    start_background = "--from-ae-startup" in sys.argv[1:] and background_on_ae_startup()
+    if start_background and app.platformName() == "windows" and workspace.start_background():
+        _log("已建立后台入口，首次打开工作台前不加载 Qt Quick")
+        return app.exec()
+    if not workspace.open():
         _log("QML 加载失败")
         return 1
-    window = engine.rootObjects()[0]
-    if window.property("systemWindowFrame"):
-        size_move_filter = WindowsSizeMoveFilter(window)
-        app.installNativeEventFilter(size_move_filter)
+    if start_background:
+        _close_after_language_restore(app, workspace.window, backend.background_session)
     _log("界面已加载，进入事件循环")
     return app.exec()
+
+
+def _close_after_language_restore(app, window, session):
+    """Let ordinary startup finish; only retire a confirmed, unused automatic window."""
+    from PySide6.QtCore import QEvent, QObject, QTimer
+    from app.background_session import AutomaticClose
+
+    class CancelOnInput(QObject):
+        def eventFilter(self, watched, event):
+            if event.type() in (QEvent.Type.MouseButtonPress, QEvent.Type.KeyPress, QEvent.Type.TouchBegin):
+                cancel_watch()
+            return False
+
+    timer = QTimer(window)
+    timer.setInterval(1000)
+    cancel = CancelOnInput(window)
+    app.installEventFilter(cancel)
+    checks = 0
+
+    def cancel_watch():
+        timer.stop()
+        app.removeEventFilter(cancel)
+        cancel.deleteLater()
+        timer.deleteLater()
+
+    def check():
+        nonlocal checks
+        checks += 1
+        if checks > 120:
+            cancel_watch()
+            return
+        action = session.automatic_close(supports_effects_background=app.platformName() == "windows")
+        if action is not AutomaticClose.WAIT:
+            cancel_watch()
+            if action in (AutomaticClose.CLOSE, AutomaticClose.KEEP_BACKGROUND):
+                window.close()
+
+    timer.timeout.connect(check)
+    timer.start()
 
 
 if __name__ == "__main__":

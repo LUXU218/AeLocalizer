@@ -11,6 +11,7 @@ import os
 import shutil
 import subprocess
 import sys
+import textwrap
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -176,6 +177,56 @@ EXCLUDES = [
 ]
 
 
+def build_startup_helper(directory: Path) -> Path:
+    compiler = shutil.which("x86_64-w64-mingw32-gcc") or shutil.which("gcc")
+    if not compiler:
+        raise RuntimeError("构建登录待机程序需要 64 位 MinGW-w64 GCC，请将 bin 目录加入 PATH。")
+    directory.mkdir(parents=True, exist_ok=True)
+    output = directory / "AeLocalizerStartup.exe"
+    subprocess.run([compiler, "-std=c11", "-Os", "-Wall", "-Wextra", "-municode", "-mwindows",
+                    "-s", "-o", str(output), str(Path(ROOT) / "native/startup.c"),
+                    "-luser32", "-lshell32"], check=True)
+    return output
+
+
+def write_qt_runtime_hook(directory: Path) -> Path:
+    """Run PyInstaller's original Qt setup only in processes that can use Qt."""
+    import PyInstaller
+
+    # The stock hook imports QtCore before app/main.py can dispatch --run-guard.
+    # Keep the installed hook (including its license and relocation logic) for
+    # the GUI, diagnostics and other scripts run through the packaged interpreter.
+    stock = Path(PyInstaller.__file__).parent / "hooks/rthooks/pyi_rth_pyside6.py"
+    hook_dir = directory / "rthooks"
+    hook_dir.mkdir(parents=True, exist_ok=True)
+    hook_name = "aelocalizer_pyside6.py"
+    wrapper = (
+        "import os, sys\n"
+        "if not (sys.argv[1:2] == ['--run-guard'] and len(sys.argv) > 2\n"
+        "        and os.path.basename(sys.argv[2]).casefold() == 'guard_uni.py'):\n"
+    )
+    (hook_dir / hook_name).write_text(wrapper + textwrap.indent(stock.read_text(encoding="utf-8"), "    "),
+                                      encoding="utf-8")
+    (directory / "rthooks.dat").write_text(repr({"PySide6": [hook_name]}), encoding="utf-8")
+    return directory
+
+
+def write_windows_manifest(directory: Path) -> Path:
+    from xml.dom import minidom
+    from PyInstaller.utils.win32.winmanifest import create_application_manifest
+
+    # Keep the packager's supported OS list, requested privileges and common controls.
+    with minidom.parseString(create_application_manifest()) as document:
+        settings, = document.getElementsByTagNameNS("urn:schemas-microsoft-com:asm.v3", "windowsSettings")
+        heap = document.createElement("heapType")
+        heap.setAttribute("xmlns", "http://schemas.microsoft.com/SMI/2020/WindowsSettings")
+        heap.appendChild(document.createTextNode("SegmentHeap"))
+        settings.appendChild(heap)
+        path = directory / "AeLocalizer.manifest"
+        path.write_bytes(document.toxml(encoding="utf-8"))
+    return path
+
+
 def main() -> int:
     onefile = "--onefile" in sys.argv
     for template in ("catalog_probe.jsx", "parameter_bridge.jsx"):
@@ -192,11 +243,16 @@ def main() -> int:
         if os.path.isdir(d):
             shutil.rmtree(d, ignore_errors=True)
 
+    helper = build_startup_helper(Path(BUILD) / "startup")
+    qt_hooks = write_qt_runtime_hook(Path(BUILD) / "qt-hooks")
+    manifest = write_windows_manifest(Path(BUILD))
     entry = os.path.join(ROOT, "app", "main.py")
     cmd = [
         sys.executable, "-m", "PyInstaller",
         "--noconfirm", "--clean",
         "--name", NAME,
+        "--manifest", str(manifest),
+        "--additional-hooks-dir", str(qt_hooks),
         # 调试用：AELOC_CONSOLE=1 时留控制台，能看到 Python 层 traceback / Qt 报错
         ("--console" if os.environ.get("AELOC_CONSOLE") == "1" else "--windowed"),
         "--distpath", DIST,
@@ -256,6 +312,7 @@ def main() -> int:
         removed = trim_qt(Path(DIST) / NAME / "_internal")
         print("\n[瘦身] 剔除 %.1f MB" % (removed / (1024 * 1024)))
 
+    shutil.copy2(helper, Path(DIST) if onefile else Path(DIST) / NAME)
     out = os.path.join(DIST, NAME + (".exe" if onefile else ""))
     if onefile:
         size = os.path.getsize(out) / (1024 * 1024)

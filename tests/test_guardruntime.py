@@ -21,6 +21,8 @@ class GuardEntryTest(unittest.TestCase):
                 "EXPECTED_EXIT = 19\n", encoding="utf-8")
             guard = Path(runtime, "guard_uni.py")
             guard.write_text(
+                "import sys\n"
+                "assert 'PySide6.QtQuick' not in sys.modules\n"
                 "from guard_entry_dependency import EXPECTED_EXIT\n"
                 "raise SystemExit(EXPECTED_EXIT)\n", encoding="utf-8")
             result = subprocess.run(

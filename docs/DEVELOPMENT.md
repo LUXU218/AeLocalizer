@@ -10,11 +10,19 @@
 .\.venv\Scripts\python.exe tools/build_exe.py
 ```
 
-默认输出为 `dist/AeLocalizer/`。分发时请压缩整个目录，保留 `AeLocalizer.exe` 和 `_internal/` 的相对位置。
+打包机需要将 64 位 MinGW-w64 GCC 的 `bin` 目录加入 `PATH`，用于编译开机待机程序。默认输出为 `dist/AeLocalizer/`。分发时请压缩整个目录，保留 `AeLocalizer.exe`、`AeLocalizerStartup.exe` 和 `_internal/` 的相对位置。
 
 使用 64 位 MinGW-w64 GCC 时，可运行 `python tools/build_native.py` 构建 `native/` 下的可选辅助 DLL。`native/utf8fixer/` 中保留修复组件的源码。构建该组件时，请从 [Adobe After Effects 开发者站点](https://developer.adobe.com/after-effects/) 自行取得适当版本的 SDK，按本地工具链配置头文件和构建工具。
 
 ## 本地测试
+
+工作台关闭、已有后台会话的确认与登录恢复决策由 `app/background_session.py` 管理。它通过 `BackgroundController` 读取应用状态和请求清理。Qt 工作台和任务栏入口由 `app/workspace_window.py` 管理，后台启动可以先创建任务栏入口，再按需加载 QML。效果名仍由原桌面进程中的控制器管理。
+
+独立设置窗口使用原有的 `SettingsPage.qml`。父进程通过 `app/settings_workspace.py` 在私有子进程管道上传递外观和常规设置，父进程负责写入设置。需要词典、壁纸、更新或引擎诊断的页面由完整工作台处理。
+
+`app/engine_session.py` 保存当前会话的通道选择、请求代次和启停结果。`AppBackend.engineSessionView` 根据它和后台回执生成工作台显示的状态。引擎页只在用户操作时发送请求，关窗或重开都从同一个后台控制器读取状态。
+
+应用的离线回归工具和用法见 [回归记录校验器](SGLOW_REGRESSION.md)。
 
 测试请使用独立的数据根目录。以下命令覆盖窗口几何、设置更新、Wallpaper Engine 和面板与脚本的回归检查。
 

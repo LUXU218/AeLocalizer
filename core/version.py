@@ -4,5 +4,5 @@ GitHub 正式发布使用 vX.Y.Z 标签和 AeLocalizer-X.Y.Z-win64.zip 资产。
 """
 from __future__ import annotations
 
-APP_VERSION = "1.0.28"
+APP_VERSION = "1.0.29"
 DEFAULT_UPDATE_REPOSITORY = "LUXU218/AeLocalizer"

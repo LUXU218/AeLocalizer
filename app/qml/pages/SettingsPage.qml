@@ -10,6 +10,16 @@ Item {
     id: root
     property var backend: null
     property int section: 0
+    property bool detached: false
+    readonly property bool hasWallpaper: backend && (detached ? backend.hasWallpaper : Theme.hasAnyBg)
+    signal openWorkbench(int section)
+
+    function selectSection(index) {
+        if (detached && index >= 2 && index <= 4)
+            openWorkbench(index)
+        else
+            section = index
+    }
 
     readonly property var sections: ["外观", "常规", "数据", "更新", "诊断", "关于"]
 
@@ -40,8 +50,14 @@ Item {
     function applyTextColor(v) {
         if (!backend) return
         backend.setTextColor(v)
+        if (detached) return
         Theme.textCustom = backend.textColor !== "" ? backend.textColor : "transparent"
         colorInput.text = backend.textColor
+    }
+
+    function syncDetachedColor() {
+        if (detached && backend)
+            colorInput.text = backend.textColor
     }
 
     function filterFonts(kw) {
@@ -107,7 +123,9 @@ Item {
                         hoverEnabled: true
                         text: modelData
                         Accessible.name: modelData
-                        onClicked: root.section = index
+                        onClicked: root.selectSection(index)
+                        ToolTip.visible: root.detached && tab.hovered && index >= 2 && index <= 4
+                        ToolTip.text: "在完整工作台中打开"
 
                         contentItem: Text {
                             text: tab.text
@@ -140,7 +158,24 @@ Item {
 
             SectionedPage {
 
-                WallpaperSettings { backend: root.backend }
+                Loader {
+                    Layout.fillWidth: true
+                    sourceComponent: root.detached ? wallpaperLink : wallpaperSettings
+                }
+                Component {
+                    id: wallpaperSettings
+                    WallpaperSettings { backend: root.backend }
+                }
+                Component {
+                    id: wallpaperLink
+                    SettingCard {
+                        title: "背景与壁纸"
+                        Button {
+                            text: "在完整工作台中管理壁纸"
+                            onClicked: root.openWorkbench(0)
+                        }
+                    }
+                }
 
                 SettingCard {
                     title: "主题与强调色"
@@ -336,7 +371,7 @@ Item {
 
                     SettingRow {
                         title: "文字颜色"
-                        visible: root.backend && Theme.hasAnyBg
+                        visible: root.hasWallpaper
 
                         Segmented {
                             current: root.backend && root.backend.textColor !== "" ? "custom" : "auto"
@@ -357,7 +392,7 @@ Item {
 
                     SettingRow {
                         title: "调色板"
-                        visible: root.backend && Theme.hasAnyBg
+                        visible: root.hasWallpaper
 
                         Repeater {
                             model: ["#ffffff", "#f2f5fa", "#10151d", "#1f2a37",
@@ -398,7 +433,7 @@ Item {
 
                     SettingRow {
                         title: "色值"
-                        visible: root.backend && Theme.hasAnyBg
+                        visible: root.hasWallpaper
 
                         Rectangle {
                             Layout.preferredWidth: 120
@@ -471,6 +506,20 @@ Item {
                     title: "启动"
 
                     SettingRow {
+                        title: "开机自动启动"
+                        hint: "登录 Windows 后待机，打开 AE 时显示主界面。"
+                        Toggle {
+                            objectName: "startupWithAeToggle"
+                            checked: root.backend ? root.backend.startupWithAe : false
+                            label: checked ? "已开启" : "已关闭"
+                            onToggled: function(nextState) {
+                                if (root.backend) root.backend.setStartupWithAe(nextState)
+                            }
+                        }
+                        Item { Layout.fillWidth: true }
+                    }
+
+                    SettingRow {
                         title: "启动时自动扫描"
 
                         Toggle {
@@ -498,109 +547,114 @@ Item {
                 }
             }
 
-            SectionedPage {
+            Loader {
+                active: !root.detached
+                sourceComponent: SectionedPage {
+                    SettingCard {
+                        title: "数据目录"
 
-                SettingCard {
-                    title: "数据目录"
+                        SettingBlock {
+                            title: "位置"
 
-                    SettingBlock {
-                        title: "位置"
+                            Rectangle {
+                                Layout.fillWidth: true
+                                implicitHeight: 30
+                                radius: Theme.radiusControl
+                                color: Theme.fieldFill
+                                border.width: 1
+                                border.color: Theme.border
 
-                        Rectangle {
-                            Layout.fillWidth: true
-                            implicitHeight: 30
-                            radius: Theme.radiusControl
-                            color: Theme.fieldFill
-                            border.width: 1
-                            border.color: Theme.border
+                                Text {
+                                    anchors.fill: parent
+                                    anchors.leftMargin: Theme.spaceMd
+                                    anchors.rightMargin: Theme.spaceMd
+                                    verticalAlignment: Text.AlignVCenter
+                                    text: root.backend ? root.backend.dataDirText : ""
+                                    color: Theme.textSecondary
+                                    font.family: Theme.monoFamily
+                                    font.pixelSize: 12
+                                    elide: Text.ElideMiddle
+                                }
+                            }
+                        }
+
+                        SettingRow {
+                            title: "占用"
 
                             Text {
-                                anchors.fill: parent
-                                anchors.leftMargin: Theme.spaceMd
-                                anchors.rightMargin: Theme.spaceMd
-                                verticalAlignment: Text.AlignVCenter
-                                text: root.backend ? root.backend.dataDirText : ""
+                                id: usageText
+                                Layout.fillWidth: true
+                                text: root.backend ? root.backend.dataDirUsage() : "—"
                                 color: Theme.textSecondary
                                 font.family: Theme.monoFamily
-                                font.pixelSize: 12
-                                elide: Text.ElideMiddle
+                                font.pixelSize: Theme.fontSmall
+                            }
+                            Button {
+                                text: "打开目录"
+                                onClicked: if (root.backend) root.backend.openDataDir()
+                            }
+                            Button {
+                                text: "刷新"
+                                onClicked: usageText.text = root.backend ? root.backend.dataDirUsage() : "—"
                             }
                         }
+
+                        Component.onCompleted: if (root.backend) usageText.text = root.backend.dataDirUsage()
                     }
 
-                    SettingRow {
-                        title: "占用"
+                    SettingCard {
+                        title: "词典"
 
-                        Text {
-                            id: usageText
-                            Layout.fillWidth: true
-                            text: root.backend ? root.backend.dataDirUsage() : "—"
-                            color: Theme.textSecondary
-                            font.family: Theme.monoFamily
-                            font.pixelSize: Theme.fontSmall
-                        }
-                        Button {
-                            text: "打开目录"
-                            onClicked: if (root.backend) root.backend.openDataDir()
-                        }
-                        Button {
-                            text: "刷新"
-                            onClicked: usageText.text = root.backend ? root.backend.dataDirUsage() : "—"
+                        SettingRow {
+                            title: "备份与恢复"
+
+                            Button {
+                                text: "导出词典"
+                                onClicked: exportDialog.open()
+                            }
+                            Button {
+                                text: "导入词典包"
+                                onClicked: importDialog.open()
+                            }
+                            Item { Layout.fillWidth: true }
                         }
                     }
 
-                    Component.onCompleted: if (root.backend) usageText.text = root.backend.dataDirUsage()
-                }
+                    SettingCard {
+                        title: "缓存"
 
-                SettingCard {
-                    title: "词典"
+                        SettingRow {
+                            title: "翻译缓存"
 
-                    SettingRow {
-                        title: "备份与恢复"
-
-                        Button {
-                            text: "导出词典"
-                            onClicked: exportDialog.open()
-                        }
-                        Button {
-                            text: "导入词典包"
-                            onClicked: importDialog.open()
-                        }
-                        Item { Layout.fillWidth: true }
-                    }
-                }
-
-                SettingCard {
-                    title: "缓存"
-
-                    SettingRow {
-                        title: "翻译缓存"
-
-                        Text {
-                            Layout.fillWidth: true
-                            text: (root.backend ? root.backend.aiCacheEntries : 0) + " 条"
-                            color: Theme.textSecondary
-                            font.family: Theme.monoFamily
-                            font.pixelSize: Theme.fontSmall
-                        }
-                        Button {
-                            text: "清空缓存"
-                            danger: true
-                            enabledButton: root.backend && root.backend.aiCacheEntries > 0
-                            onClicked: {
-                                if (!root.backend) return
-                                root.backend.clearAiCache()
+                            Text {
+                                Layout.fillWidth: true
+                                text: (root.backend ? root.backend.aiCacheEntries : 0) + " 条"
+                                color: Theme.textSecondary
+                                font.family: Theme.monoFamily
+                                font.pixelSize: Theme.fontSmall
+                            }
+                            Button {
+                                text: "清空缓存"
+                                danger: true
+                                enabledButton: root.backend && root.backend.aiCacheEntries > 0
+                                onClicked: {
+                                    if (!root.backend) return
+                                    root.backend.clearAiCache()
+                                }
                             }
                         }
                     }
                 }
             }
 
-            UpdateSection {
-                backend: root.backend
+            Loader {
+                active: !root.detached
+                sourceComponent: UpdateSection { backend: root.backend }
             }
 
-            SectionedPage {
+            Loader {
+                active: !root.detached
+                sourceComponent: SectionedPage {
 
                 SettingCard {
                     title: "运行信息"
@@ -660,6 +714,7 @@ Item {
                         }
                         Item { Layout.fillWidth: true }
                     }
+                }
                 }
             }
 

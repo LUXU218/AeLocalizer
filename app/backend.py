@@ -21,7 +21,9 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QCursor, QGuiApplication
 
+from app.background_session import BackgroundSession, BackgroundState
 from app.dictmodel import DictListModel
+from app.engine_session import EngineOperation, EngineSessionState, host_identity
 from app.groupmodel import GroupListModel
 from app.namemodel import NameListModel
 
@@ -283,6 +285,7 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
     inventoryChanged = Signal()
     versionsChanged = Signal()
     stateChanged = Signal()
+    engineSessionChanged = Signal()
     #: 效果名编辑器的勾选变化（批量操作按钮的可用状态）
     nameSelectionChanged = Signal()
     #: 词典内容变了（编辑/新增/导入/接受草稿）→ 词典面板重新载入
@@ -339,7 +342,8 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
 
         # ---- 运行时引擎状态 ----
         self._engine = engine.EngineStatus()
-        self._engineBusy = False
+        self._engineSession = EngineSessionState()
+        self.stateChanged.connect(self.engineSessionChanged)
         self._attrib: Dict[str, List[str]] = {}
         self._attribLoaded = False
         self._keepUnowned = True
@@ -465,10 +469,6 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
         #   _effGen 每次点击 +1；所有 pause/resume/revert/apply 前后都必须用它
         #   校验，晚到的旧操作一律放弃。_liveOpLock 把 frida 同步 RPC 串行化，
         #   杜绝 pause 与 resume 并发。
-        self._effWant = None                 # None = 还没点过，读 channelState
-        self._effGen = 0
-        self._langWant = None                # 合并语言通道的最后意图（inventory 未就绪也不丢）
-        self._langGen = 0
         try:
             from core import settings as _settings
             _lv = _settings.get(DATA_ROOT, "language_intent", None)
@@ -499,6 +499,8 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
         self._liveHostProbe = None
         self._liveHostProbeAt = 0.0
         self._liveHostSnapshot = None
+        self.background_session = BackgroundSession(self, DATA_ROOT)
+        self._engineSession.resume_background(engine.background_language_session())
         self._liveAutoEnabled = self._live_auto_allowed()
         if self._liveAutoEnabled:
             # 启动静默预扫：三通道开关与自动补写都依赖插件清单（_inv），
@@ -894,19 +896,24 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
             if getattr(self, "_dictRowsRev", None) != rev:
                 world = self._pipl_world()
                 names = self._effect_name_keys()
-                rows = [
+                rows = (
                     {"en": k, "zh": r.zh, "layer": r.layer,
                      "gauge": describe(k, r.zh, world)}
                     for k, r in self._store.resolve().items()
                     if not self._is_effect_name(k, names)
-                ]
-                self._dictModel.setRows(rows)
+                )
+                self._dictTotal = self._dictModel.setRows(rows)
                 self._dictRowsRev = rev
-                self._dictTotal = len(rows)
             return "共 %d 条参数/下拉译名（效果名在「效果名」子页改）" % int(
                 getattr(self, "_dictTotal", 0))
         except Exception as exc:
             return "载入词典失败：%s" % str(exc)[:80]
+
+    def release_workspace_dictionary(self) -> None:
+        """Discard rebuildable dictionary data after the workspace closes."""
+        self._dictModel.clear()
+        self._dictRowsRev = None
+        self._store.clear_resolution_cache()
 
     @Slot(str)
     def filterDict(self, keyword: str):
@@ -1269,6 +1276,117 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
 
     # ---------------------------------------------------------- 引擎属性
 
+    # Existing worker paths use these names. The session owns the values.
+    @property
+    def _engineBusy(self):
+        return self._engineSession.busy
+
+    @_engineBusy.setter
+    def _engineBusy(self, busy):
+        if busy:
+            self._engineSession.begin(EngineOperation.STARTING)
+        else:
+            self._engineSession.finish()
+
+    @property
+    def _effWant(self):
+        return self._engineSession.effect_request
+
+    @_effWant.setter
+    def _effWant(self, value):
+        self._engineSession.effect_request = value
+
+    @property
+    def _effGen(self):
+        return self._engineSession.effect_generation
+
+    @_effGen.setter
+    def _effGen(self, value):
+        self._engineSession.effect_generation = value
+
+    @property
+    def _langWant(self):
+        return self._engineSession.language_request
+
+    @_langWant.setter
+    def _langWant(self, value):
+        self._engineSession.language_request = value
+
+    @property
+    def _langGen(self):
+        return self._engineSession.language_generation
+
+    @property
+    def _reopenedBackground(self):
+        return self._engineSession.reopened_background
+
+    @_reopenedBackground.setter
+    def _reopenedBackground(self, value):
+        self._engineSession.reopened_background = value
+
+    @Property("QVariantMap", notify=engineSessionChanged)
+    def engineSessionView(self):
+        status = engine.control_status()
+        confirmed = engine.profile_runtime_confirmed(status)
+        with self._liveIntentLock:
+            session = replace(self._engineSession)
+            effect, language, _ = self.channelState()
+        running = self._engine.running or confirmed
+        if session.operation is EngineOperation.STARTING:
+            summary = "正在启动引擎"
+        elif session.stop_status:
+            summary = session.stop_status
+        elif not running:
+            summary = "引擎未运行"
+        elif not confirmed:
+            summary = "已检测引擎，当前配置未确认"
+        else:
+            summary = "当前配置引擎已就绪"
+
+        language_phase = session.language_phase(language, status, running=running, confirmed=confirmed)
+        if language_phase == "applied":
+            language_text = self._language_status_text(status, receipt_only=True)
+            if not language and (status.get("popup_restore_unknown") or status.get("popup_error")):
+                language_phase = "restore-unconfirmed"
+        elif language_phase == "acknowledged":
+            language_text = self._language_status_text(dict(status, language_ready=False))
+        elif language_phase == "waiting-receipt":
+            action = "开启" if language else "停用"
+            language_text = "参数名与下拉值：已请求%s，等待确认" % action
+        elif language_phase == "waiting-engine":
+            language_text = "参数名与下拉值：设置为开，等待引擎"
+        else:
+            language_text = ""
+
+        effect_phase = session.effect_phase(effect, running=running, confirmed=confirmed,
+                                            host=host_identity(status.get("host")))
+        effect_text = {
+            "waiting-engine": "效果名通道：设置为开，等待引擎",
+            "waiting-receipt": "效果名通道：已请求%s，等待确认" % ("开启" if effect else "停用"),
+            "ready": "效果名通道已就绪",
+            "paused": "效果名通道已确认暂停",
+        }.get(effect_phase, "")
+        if session.operation is EngineOperation.STOPPING or session.stop_result is not None:
+            effect_text = language_text = ""
+            effect_phase = language_phase = "idle"
+        return {
+            "running": running,
+            "confirmed": confirmed,
+            "busy": session.busy,
+            "summary": summary,
+            "effectRequested": effect,
+            "languageRequested": language,
+            "effectPhase": effect_phase,
+            "effectStatus": effect_text,
+            "languagePhase": language_phase,
+            "languageStatus": language_text,
+        }
+
+    @Slot()
+    def refreshEngineSessionDisplay(self):
+        """Ask the visible workbench to reread the existing receipt."""
+        self.engineSessionChanged.emit()
+
     @Property(bool, notify=stateChanged)
     def engineRunning(self):
         return self._engine.running
@@ -1508,9 +1626,7 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
     def _live_intent_set(self, on: bool) -> int:
         """记录用户对效果名通道的最新明确意图，返回新的意图代号。"""
         with self._liveIntentLock:
-            self._effWant = bool(on)
-            self._effGen += 1
-            gen = self._effGen
+            gen = self._engineSession.request_effect(on)
         if on:
             self._liveHookStopped = False
             self._liveHookResumedGen = None
@@ -1527,6 +1643,14 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
             except Exception:
                 want = True
         return bool(want), gen
+
+    def _remember_effect_receipt(self, generation, host, enabled):
+        if not host:
+            return
+        with self._liveIntentLock:
+            if self._effGen == generation and not self._liveShutdown:
+                self._engineSession.effect_receipt = (
+                    generation, (host[0], host[1], os.path.normcase(host[2])), enabled)
 
     def _live_intent_ok(self, gen: int, on: bool) -> bool:
         """代号和意图都还没变 → 这个操作仍然有效。
@@ -1606,15 +1730,14 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
             _gen = self._live_intent_set(on)
         elif kind == "lang":
             with self._liveIntentLock:
-                self._langWant = bool(on)
                 # 跨 GUI 重启也可排序：本机 monotonic_ns，而不是从小整数重来。
-                self._langGen = max(int(time.monotonic_ns()),
-                                    int(self._langGen) + 1)
+                self._engineSession.request_language(on, time.monotonic_ns())
             try:
                 from core import settings as _settings
                 _settings.put(DATA_ROOT, "language_intent", bool(on))
             except Exception:
                 pass
+        self.engineSessionChanged.emit()
         if self._inv is None:
             # 清单还没就绪（启动预扫没跑完）。effect/lang 都已记意图，
             # 扫描完成后会按最后意图应用；这里只说一声。
@@ -1672,7 +1795,9 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
 
     @Property(str, notify=stateChanged)
     def languageStatusText(self):
-        st = engine.control_status()
+        return self._language_status_text(engine.control_status())
+
+    def _language_status_text(self, st, *, receipt_only=False):
         adapt = getattr(self, "_autoAdaptStatus", "")
         if not st:
             return adapt or "语言控制面未就绪"
@@ -1710,9 +1835,13 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
             text_skip_capacity = int(ds.get("text_skip_capacity") or 0)
             draw_replaced = int(ds.get("replaced") or 0)
             rendered = "参数名" if st.get("popup_error") else "参数/下拉"
+            if receipt_only:
+                applied_text = "参数通道已收到绘制替换回执"
+            else:
+                applied_text = ("当前已发现的" if background else "") + rendered + "已显示中文"
             if text_enabled:
                 if text_replaced > 0 and text_err == 0:
-                    text = ("当前已发现的" if background else "") + rendered + "已显示中文"
+                    text = applied_text
                 elif text_err > 0:
                     text = "参数通道已就绪；文本标签替换异常 %d（详见诊断）" % text_err
                 elif text_hits > 0 and text_skip_capacity > 0:
@@ -1725,16 +1854,22 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
                 if text_err == 0 and text_skip_invalid > 0:
                     text += "；文本标签无效跳过 %d" % text_skip_invalid
             elif draw_replaced > 0:
-                text = ("当前已发现的" if background else "") + rendered + "已显示中文"
+                text = applied_text
             else:
                 text = "参数通道已就绪（等待首次绘制确认）"
             if mode != "on":
-                text = ("当前已发现的参数/下拉已还原原文" if background
-                        else "参数/下拉已还原原文")
+                if receipt_only:
+                    text = "参数/下拉已收到停用回执"
+                else:
+                    text = ("当前已发现的参数/下拉已还原原文" if background
+                            else "参数/下拉已还原原文")
             # 会话写入或重连后可能缺少下拉恢复所需的记录。
             if mode != "on" and st.get("popup_restore_unknown"):
-                text = ("参数已还原原文；下拉通道状态未知，可能仍显示译文。"
-                        "如仍显示译文，请保存工程并重启 AE。")
+                if receipt_only:
+                    text = "参数已收到停用回执；下拉还原待确认。"
+                else:
+                    text = ("参数已还原原文；下拉通道状态未知，可能仍显示译文。"
+                            "如仍显示译文，请保存工程并重启 AE。")
                 if background:
                     text += "，正在检查新增效果…"
                 return text
@@ -1796,24 +1931,11 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
         返回 [effect, param, enum]，取「所有组都开」为 true。
         """
         if not self._inv or not self._inv.groups:
-            return [True, True, True]
-        from core.inventory import CH_EFFECT, CH_PARAM, CH_ENUM
-
-        def all_on(ch):
-            return all(ch in g.channels for g in self._inv.groups)
-
-        # ★ 2026-11-08：效果名这一路优先用用户刚点的意图（_effWant）。
-        #   清单重建/载入选择期间部分组会短暂缺 CH_EFFECT，all_on 会假报
-        #   关闭，QML 的 refresh() 拿它回显就会把开关自己弹回「关」——
-        #   用户看到的就是「开了过一会儿又自己关掉」。
-        _eff = getattr(self, "_effWant", None)
-        eff = all_on(CH_EFFECT) if _eff is None else bool(_eff)
-        _lang = getattr(self, "_langWant", None)
-        if _lang is None:
-            lang = all_on(CH_PARAM)
-        else:
-            lang = bool(_lang)
-        return [eff, lang, lang]
+            return self._engineSession.channels(not self._reopenedBackground, True)
+        return self._engineSession.channels(
+            all(CH_EFFECT in group.channels for group in self._inv.groups),
+            all(CH_PARAM in group.channels for group in self._inv.groups),
+        )
 
     @Slot()
     def selectAll(self):
@@ -2121,7 +2243,7 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
                     for g in self._inv.selected())
         except Exception:
             pass
-        return False
+        return bool(self._reopenedBackground)
 
     def _param_catchup_async(self, reason: str = "") -> None:
         """引擎恢复后，把已存在参数 stream 的显示名缓存补成中文。
@@ -2480,6 +2602,11 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
                 if CH_PARAM in g.channels or CH_ENUM in g.channels]
         if not need:
             return
+        reopened = getattr(self, "_reopenedBackground", None)
+        if reopened and self._langWant and engine.active_language_session() == reopened:
+            # Opening the settings window alone must leave the current user's session in place.
+            return
+        self._reopenedBackground = None
         try:
             if engine.engine_running() or engine.read_guard_lock(stale_ok=True):
                 # managed runtime 已存活：即便 guard 已有旧 host，也必须把
@@ -2527,37 +2654,24 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
                         str(p.get("image") or "AfterFX.exe"))}
             if not host["pid"] or not host["ctime"]:
                 return False
-            _hk = (host["pid"], host["ctime"], host["image"])
-            if getattr(self, "_lastLangHost", None) != _hk:
-                with self._liveIntentLock:
-                    self._langGen = max(int(time.monotonic_ns()),
-                                        int(getattr(self, "_langGen", 0)) + 1)
-                    self._lastLangHost = _hk
-                    self._lastControlKey = None
-            want = getattr(self, "_langWant", None)
-            if want is None:
-                want = bool(self.channelState()[1])
-            if not int(getattr(self, "_langGen", 0)):
-                with self._liveIntentLock:
-                    self._langGen = int(time.monotonic_ns())
-            mode = "on" if want else "off"
-            key = (host["pid"], host["ctime"], host["image"],
-                   mode, int(self._langGen))
-            if getattr(self, "_lastControlKey", None) == key:
-                st = engine.control_status()
-                if (st.get("ack_gen") == int(self._langGen)
-                        and str(st.get("mode")) == mode
-                        and os.path.normcase(str(
-                            (st.get("host") or {}).get("image") or "")) ==
-                        os.path.normcase(host["image"])):
+            with self._liveIntentLock:
+                command = self._engineSession.language_command(
+                    host_identity(host), self.channelState()[1], time.monotonic_ns())
+                sent = self._engineSession.sent_language_command
+            if sent == command:
+                status = engine.control_status()
+                if command.acknowledged(status):
                     return True
             try:
                 self._write_param_identity(procs)
             except Exception:
                 pass
-            ok = bool(engine.send_control(mode, int(self._langGen), host))
+            ok = bool(engine.send_control(command.mode, command.generation, host))
             if ok:
-                self._lastControlKey = key
+                with self._liveIntentLock:
+                    if (self._engineSession.language_generation == command.generation
+                            and self._engineSession.language_host == command.host):
+                        self._engineSession.sent_language_command = command
             return ok
         except Exception:
             return False
@@ -2771,7 +2885,9 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
         _drop = None
 
         self._engine_intent_set(True)
-        self._engineBusy = True
+        if self._engineSession.stop_result is not None:
+            self._status = "就绪"
+        self._engineSession.begin(EngineOperation.STARTING)
         self.stateChanged.emit()
 
         def work():
@@ -2805,7 +2921,7 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
 
         def done(payload):
             res, ok, msg = payload
-            self._engineBusy = False
+            self._engineSession.finish()
             self._engineAutoTried = False
             _quiet_restore = bool(getattr(self, "_engineRestoreQuiet", False))
             self._engineRestoreQuiet = False
@@ -2834,7 +2950,7 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
 
         def start_fail(msg):
             # _run 在线程异常时不会调用 done；不清 busy 会永久拒绝后续启动。
-            self._engineBusy = False
+            self._engineSession.finish()
             self._engineAutoTried = False
             self._engineAutoTriedAt = time.monotonic()
             self._engineRestoreQuiet = False
@@ -2851,19 +2967,27 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
     def stopEngine(self):
         """优雅停止引擎（写 STOP_NOW.flag，等它自己卸载 hook）。"""
         self._engine_intent_set(False)
+        self._reopenedBackground = None
+        engine.request_foreground_window()
         self._paramIntentGen = int(getattr(self, "_paramIntentGen", 0)) + 1
         if self._engineBusy:
             self.toast.emit("warn", "引擎正在处理中，请稍候")
+            self.engineSessionChanged.emit()
             return
         if not engine.engine_running():
+            self._engineSession.finish(stop_result=True)
+            self._status = "引擎未运行"
             self.toast.emit("info", "引擎本来就没在运行")
+            self.refreshEngine()
             return
-        self._engineBusy = True
+        self._engineSession.begin(EngineOperation.STOPPING)
+        self._status = self._engineSession.stop_status
         self.stateChanged.emit()
 
         def done(payload):
             ok, msg = payload
-            self._engineBusy = False
+            self._engineSession.finish(stop_result=bool(ok))
+            self._status = self._engineSession.stop_status
             _quiet_stop = bool(getattr(self, "_engineStopQuiet", False))
             self._engineStopQuiet = False
             self.toast.emit("info" if ok else "warn", msg)
@@ -2881,7 +3005,13 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
             # 引擎启停不再调用旧 _liveNamesAsync（不写 name slot、不重启 AE）。
             self.refreshEngine()
 
-        self._run(engine.stop_engine, done, _busy_text="正在停止引擎…")
+        def stop_fail(msg):
+            self._engineSession.finish(stop_result=False)
+            self._status = self._engineSession.stop_status
+            self._engineStopQuiet = False
+            self.refreshEngine()
+
+        self._run(engine.stop_engine, done, _busy_text="正在停止引擎…", _on_fail=stop_fail)
 
     def _liveNamesAsync(self, mode: str, reason: str = "",
                         allow_restart: bool = True):
@@ -4692,6 +4822,7 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
                     self._auto_adapt_async(self._running_ae_version(procs), hosts=procs)
             except Exception:
                 pass
+            self.engineSessionChanged.emit()
         if self._busy or self._engineBusy or not self._inv:
             # ★ 带原因和时间戳：固定字符串会被 _live_watch_log 去重，
             #   用户只看到「一直在等待」，看不到卡在 busy/engine/inv 哪一个。
@@ -4914,6 +5045,55 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
             self._liveHookCatchupGen = None
             self._live_watch_log("挂钩恢复后补写失败: %s" % exc)
 
+    def _effects_need_window(self):
+        hook = getattr(self, "_liveHook", None)
+        if hook is not None and hook.running() and not hook.paused():
+            return True
+        if self._effWant is not None:
+            return self._effWant
+        return bool(self._inv and any(CH_EFFECT in g.channels for g in self._inv.selected()))
+
+    def background_state(self) -> BackgroundState:
+        with self._liveIntentLock:
+            language = self.channelState()[1]
+            return BackgroundState(
+                shutting_down=self._liveShutdown,
+                engine_busy=self._engineBusy,
+                language_disabled=self._langWant is False,
+                language_configured=self._inv is not None or bool(self._reopenedBackground),
+                language_command=self._engineSession.requested_language_command(language),
+                engine_detected=self._engine.running,
+                stop_unconfirmed=self._engineSession.stop_result is False,
+            )
+
+    def background_operations_busy(self, *, include_panel: bool = False) -> bool:
+        return (self.busy or self._engineBusy or (include_panel and self.panelLocalization.busy)
+                or any(worker.isRunning() for worker in self._workers))
+
+    def background_needs_effects_controller(self) -> bool:
+        return self._effects_need_window()
+
+    def background_engine_enabled(self) -> bool:
+        return self._engine_intent_allowed()
+
+    def notify_background(self, level: str, message: str) -> None:
+        self.toast.emit(level, message)
+
+    @Property(bool, notify=engineSessionChanged)
+    def backgroundModeAvailable(self):
+        return self.background_session.language_can_stay()
+
+    @Slot(result=bool)
+    def closeToBackground(self):
+        return self.background_session.prepare_language_handoff()
+
+    def rememberBackgroundOnStartup(self):
+        return self.background_session.remember_background_on_startup()
+
+    @Slot(result=bool)
+    def requestWindowClose(self):
+        return self.background_session.request_close()
+
     @Slot()
     def shutdown(self):
         """Ordinary app close: bounded effect teardown, never hang the UI."""
@@ -5097,6 +5277,7 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
                                 hook, int(getattr(self, "_effGen", 0)))
                             if ok_re:
                                 self._liveHookResumedGen = _gen
+                                self._remember_effect_receipt(_gen, _skey, True)
                                 self._live_watch_log("挂钩恢复成功(gen=%s)" % _gen)
                             else:
                                 self._live_watch_log(
@@ -5187,6 +5368,7 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
             if not _want3 or _gen3 != _gen:
                 return
             self._liveHookResumedGen = _gen
+            self._remember_effect_receipt(_gen, _skey, True)
             self._live_hook_catchup(_gen)
             self._live_first_refresh(int(pid), _gen)
             self._live_watch_log("显示名挂钩已启用(pid=%s,gen=%s)" % (pid, _gen))
@@ -5407,13 +5589,14 @@ if (f) { f.open('w'); f.write(r); f.close(); }
             return getattr(self, "_liveShutdown", False) or (
                 (not force) and self._live_intent()[0])
 
-        def _mark_stopped() -> None:
+        def _mark_stopped(host=None) -> None:
             # 只有「代号仍是本次 OFF」才记已停用；否则旧线程可能在新 ON 之后
             # 写脏 _liveHookStopped，让下一轮 OFF 直接早退、根本不去 pause。
             _w2, _g2 = self._live_intent()
             if (not _w2) and _g2 == _gen:
                 self._liveHookResumedGen = None
                 self._liveHookStopped = True
+                self._remember_effect_receipt(_gen, host, False)
 
         def _bg():
             try:
@@ -5510,7 +5693,7 @@ if (f) { f.open('w'); f.write(r); f.close(); }
                     #   _live_revert_tick 的后台自愈拍补，不再占开关关键路径。
                     # 只有仍是最新 OFF 意图才记账为「已停用」。若期间变成 ON，
                     # 不设 _liveHookStopped，下一拍会走 resume 分支。
-                    _mark_stopped()
+                    _mark_stopped(self._liveHookSession)
             except Exception:
                 pass
             finally:
@@ -5928,6 +6111,7 @@ if (f) { f.open('w'); f.write(r); f.close(); }
                 self._live_watch_log("自动补写已取消(意图代号已变)")
                 return
             reason = res.get("noopReason") or ""
+            show_effect_feedback = not self._engineSession.stop_status
             if reason:
                 if "parade" in reason:
                     # roots 还没热身：允许 catchup 下一拍再排一次，别永久记账。
@@ -5935,10 +6119,10 @@ if (f) { f.open('w'); f.write(r); f.close(); }
                             and getattr(self, "_liveHookCatchupGen", None) == intent_gen):
                         self._liveHookCatchupGen = None
                     wait_msg = "效果名同步中，稍后自动补写"
-                    if getattr(self, "_status", "") != wait_msg:
+                    if show_effect_feedback and getattr(self, "_status", "") != wait_msg:
                         self._status = wait_msg
                         self.stateChanged.emit()
-                    if not quiet:
+                    if show_effect_feedback and not quiet:
                         self.toast.emit("info", wait_msg)
                     self._live_watch_log(
                         "效果名同步等待(gen=%s):%s" % (intent_gen, reason))
@@ -5955,10 +6139,11 @@ if (f) { f.open('w'); f.write(r); f.close(); }
                 if skipped:
                     parts.append("%d 条未加载" % len(skipped))
                 msg = "、".join(parts)
-                self._status = msg
-                self.stateChanged.emit()
-                self.toast.emit("info", msg
-                                + "(面板已刷新;AE 重启后会自动补写,不用再拨开关)")
+                if show_effect_feedback:
+                    self._status = msg
+                    self.stateChanged.emit()
+                    self.toast.emit("info", msg
+                                    + "(面板已刷新;AE 重启后会自动补写,不用再拨开关)")
                 problem = res.get("unwritable")
                 if problem and problem.get("message"):
                     self.toast.emit("warn", problem["message"])

@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Templates as Templates
+import QtQuick.Controls.Basic as Basic
 import QtQuick.Window
 import QtQuick.Effects
 import AeLocalizer
@@ -16,7 +17,8 @@ Window {
     minimumHeight: hasStartupArea ? Math.min(500, startupArea.height) : 500
     width: hasStartupArea ? initialExtent(startupArea.width, minimumWidth, 0.62) : 1180
     height: hasStartupArea ? initialExtent(startupArea.height, minimumHeight, 0.70) : 760
-    visible: !hasStartupArea
+    readonly property bool deferShow: typeof deferWorkspaceShow !== "undefined" && deferWorkspaceShow
+    visible: !deferShow && !hasStartupArea
     title: "AeLocalizer · 映"
     color: Theme.bgBase
     readonly property bool systemWindowFrame: typeof useWindowsFrame !== "undefined"
@@ -37,10 +39,20 @@ Window {
             pageIndex = 5
             return
         }
-        backend.shutdown()
+        close.accepted = workspace ? workspace.requestClose() : backend.requestWindowClose()
     }
 
     readonly property var backend: typeof appBackend !== "undefined" ? appBackend : null
+    readonly property var workspace: typeof workspaceWindow !== "undefined" ? workspaceWindow : null
+    readonly property var engineSession: backend ? backend.engineSessionView : null
+
+    Timer {
+        interval: 1000
+        repeat: true
+        running: root.visible && root.visibility !== Window.Minimized && !!root.backend
+        onTriggered: root.backend.refreshEngineSessionDisplay()
+    }
+
     property int currentIndex: 0
     property int settingsSection: 0
 
@@ -64,6 +76,14 @@ Window {
         return Math.max(minimum, withResizeRoom, Math.round(available * ratio))
     }
 
+    // Create secondary pages on first visit and preserve their edits across navigation.
+    component DeferredPage: Loader {
+        required property int page
+        property bool visited: false
+        active: visited || root.pageIndex === page
+        onLoaded: visited = true
+    }
+
     function syncWallpaper() {
         if (!backend) return
         Theme.bgImage = backend.bgImage
@@ -83,7 +103,7 @@ Window {
         if (hasStartupArea) {
             x = startupArea.x + Math.floor((startupArea.width - width) / 2)
             y = startupArea.y + Math.floor((startupArea.height - height) / 2)
-            visible = true
+            if (!deferShow) visible = true
         }
         if (!backend) return
         Theme.themeMode = backend.uiTheme
@@ -230,9 +250,10 @@ Window {
                 font.weight: Font.DemiBold
             }
 
-            Item { Layout.fillWidth: true }
-
             Text {
+                Layout.fillWidth: true
+                horizontalAlignment: Text.AlignRight
+                elide: Text.ElideLeft
                 text: (backend ? ("安装 " + backend.currentVersion + " · " + backend.hostAeVersionText) : "AE -")
                 color: Theme.textTertiary
                 font.family: Theme.monoFamily
@@ -243,6 +264,18 @@ Window {
             Row {
                 id: windowControls
                 spacing: 6
+
+                Button {
+                    objectName: "runInBackgroundAction"
+                    text: "转入后台"
+                    height: 26
+                    visible: !!root.backend && (root.backend.backgroundModeAvailable || !!root.workspace && root.workspace.effectsCanStay)
+                    Accessible.description: "关闭工作台并继续汉化。再次打开 AeLocalizer 可修改设置或停止引擎。"
+                    Basic.ToolTip.text: Accessible.description
+                    Basic.ToolTip.visible: hovered
+                    Basic.ToolTip.delay: 500
+                    onClicked: root.close()
+                }
 
                 Repeater {
                     model: [
@@ -402,11 +435,11 @@ Window {
                                 implicitWidth: 7
                                 implicitHeight: 7
                                 radius: 4
-                                color: backend && backend.engineProfileConfirmed ? Theme.success : Theme.textTertiary
+                                color: root.engineSession && root.engineSession.confirmed ? Theme.success : Theme.textTertiary
                             }
                             Text {
                                 Layout.fillWidth: true
-                                text: backend ? backend.engineProfileStatus : "引擎未运行"
+                                text: root.engineSession ? root.engineSession.summary : "引擎未运行"
                                 color: Theme.textPrimary
                                 font.family: Theme.fontFamily
                                 font.pixelSize: Theme.fontSmall
@@ -415,7 +448,7 @@ Window {
                         }
                         Text {
                             Layout.fillWidth: true
-                            visible: !!backend && backend.engineRunning
+                            visible: !!root.engineSession && root.engineSession.running
                             text: backend ? "词典 " + backend.engineDictEntries + " 条" : ""
                             color: Theme.textSecondary
                             font.family: Theme.fontFamily
@@ -432,49 +465,69 @@ Window {
             height: parent.height
             currentIndex: root.pageIndex
 
-            PageShell {
-                title: "翻译工作台"
-                description: "选择插件，生成译文并校对草稿。"
-                actions: translationPage.headerActions
-                AiPage { id: translationPage; anchors.fill: parent; backend: root.backend }
+            DeferredPage {
+                page: 0
+                sourceComponent: PageShell {
+                    objectName: "translationWorkspace"
+                    title: "翻译工作台"
+                    description: "选择插件，生成译文并校对草稿。"
+                    actions: translationPage.headerActions
+                    AiPage { id: translationPage; anchors.fill: parent; backend: root.backend }
+                }
             }
-            PageShell {
-                title: "效果名称"
-                description: "按厂商和套装查找效果，编辑显示名称。"
-                NamesPage { anchors.fill: parent; backend: root.backend }
+            DeferredPage {
+                page: 1
+                sourceComponent: PageShell {
+                    title: "效果名称"
+                    description: "按厂商和套装查找效果，编辑显示名称。"
+                    NamesPage { anchors.fill: parent; backend: root.backend }
+                }
             }
-            PageShell {
-                title: "汉化引擎"
-                description: "查看当前配置的运行状态，管理实时汉化通道。"
-                EnginePage { anchors.fill: parent; backend: root.backend }
+            DeferredPage {
+                page: 2
+                sourceComponent: PageShell {
+                    title: "汉化引擎"
+                    description: "查看当前配置的运行状态，管理实时汉化通道。"
+                    EnginePage { anchors.fill: parent; backend: root.backend }
+                }
             }
-            PageShell {
-                title: "词条补录"
-                description: "从 AE 提取词条，补充参数和下拉选项的译名。"
-                CapturePage { anchors.fill: parent; backend: root.backend }
+            DeferredPage {
+                page: 3
+                sourceComponent: PageShell {
+                    title: "词条补录"
+                    description: "从 AE 提取词条，补充参数和下拉选项的译名。"
+                    CapturePage { anchors.fill: parent; backend: root.backend }
+                }
             }
-            PageShell {
-                title: "设置"
-                description: "管理工作台外观、数据与更新。"
-                SettingsPage {
-                    id: settingsPage
-                    anchors.fill: parent
-                    backend: root.backend
-                    Component.onCompleted: section = root.settingsSection
-                    Connections {
-                        target: root
-                        function onSettingsSectionChanged() {
-                            settingsPage.section = root.settingsSection
+            DeferredPage {
+                page: 4
+                sourceComponent: PageShell {
+                    title: "设置"
+                    description: "管理工作台外观、数据与更新。"
+                    SettingsPage {
+                        id: settingsPage
+                        anchors.fill: parent
+                        backend: root.backend
+                        Component.onCompleted: section = root.settingsSection
+                        onSectionChanged: root.settingsSection = section
+                        Connections {
+                            target: root
+                            function onSettingsSectionChanged() {
+                                settingsPage.section = root.settingsSection
+                            }
                         }
                     }
                 }
             }
-            PageShell {
-                title: "面板与脚本"
-                description: "选择 CEP 面板或 JSX 脚本，校对词条并预览汉化结果。"
-                PanelPage {
-                    anchors.fill: parent
-                    controller: root.backend ? root.backend.panelLocalization : null
+            DeferredPage {
+                page: 5
+                sourceComponent: PageShell {
+                    title: "面板与脚本"
+                    description: "选择 CEP 面板或 JSX 脚本，校对词条并预览汉化结果。"
+                    PanelPage {
+                        anchors.fill: parent
+                        controller: root.backend ? root.backend.panelLocalization : null
+                    }
                 }
             }
         }
@@ -507,6 +560,7 @@ Window {
                 color: backend && backend.busy ? Theme.warn : Theme.success
             }
             Text {
+                objectName: "workbenchStatus"
                 text: backend && backend.busy ? backend.busyText
                                               : (backend ? backend.statusText : "就绪")
                 color: Theme.textOnBgSecondary

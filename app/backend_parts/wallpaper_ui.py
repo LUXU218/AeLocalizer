@@ -479,8 +479,14 @@ class WallpaperUiMixin:
 
     @Property(bool, constant=True)
     def webEngineAvailable(self):
-        """本机能不能实时渲染场景（装了 PySide6-WebEngine 且已在启动时初始化）。"""
-        return os.environ.get("AELOC_WEBENGINE") == "1"
+        """Verify the optional binding on the scene path and keep the extraction fallback."""
+        if os.environ.get("AELOC_WEBENGINE") != "1":
+            return False
+        try:
+            from PySide6.QtWebEngineQuick import QtWebEngineQuick
+        except (ImportError, OSError):
+            return False
+        return True
 
     @Property(str, notify=videoBgChanged)
     def bgSceneUrl(self):

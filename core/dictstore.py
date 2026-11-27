@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from .dictpack import DictPack, PackError, read_pack
@@ -90,6 +91,47 @@ class PackInfo:
     order: int = 0
 
 
+_MISSING = object()
+_STANDARD_FIELDS = {"zh", "priority", "note"}
+
+
+@dataclass(slots=True)
+class _PackEntry:
+    zh: str
+    priority: object
+    note: object
+
+    def as_json(self):
+        entry = {"zh": self.zh}
+        if self.priority is not _MISSING:
+            entry["priority"] = self.priority
+        if self.note is not _MISSING:
+            entry["note"] = self.note
+        return entry
+
+
+def _compact_pack(entries):
+    if not isinstance(entries, dict):
+        return entries
+    # Thousands of entries in a pack can share the same source note.
+    @lru_cache(maxsize=256)
+    def shared_note(note):
+        return note
+
+    for key, raw in entries.items():
+        # Old disabled packs can contain records that were never resolved or validated.
+        if not isinstance(raw, dict) or not isinstance(raw.get("zh"), str) or not raw.keys() <= _STANDARD_FIELDS:
+            continue
+        priority = raw.get("priority", _MISSING)
+        note = raw.get("note", _MISSING)
+        if (priority is not _MISSING and type(priority) is not int) or (note is not _MISSING and not isinstance(note, str)):
+            continue
+        if isinstance(note, str):
+            note = shared_note(note)
+        entries[key] = _PackEntry(raw["zh"], priority, note)
+    return entries
+
+
 @dataclass
 class ImportPreview:
     """导入前的预览：不落盘，只告诉用户会发生什么。"""
@@ -115,12 +157,12 @@ class DictStore:
     """内存中的分层词典。持久化由 save/load 负责。"""
 
     def __init__(self) -> None:
-        self._layers: Dict[str, Dict[str, Dict[str, str]]] = {
+        self._layers: Dict[str, Dict[str, str]] = {
             "builtin": {},
-            "pack": {},
             "user": {},
             "user_locked": {},
         }
+        self._pack_entries: Dict[str, Dict[str, _PackEntry | dict]] = {}
         self.packs: List[PackInfo] = []
         self._resolution_cache: Optional[Dict[str, Resolution]] = None
         #: 层内容版本号：任何会改变 resolve() 结果的改动都 +1。
@@ -130,12 +172,12 @@ class DictStore:
     # ---------- 层操作 ----------
 
     def set_builtin(self, entries: Dict[str, str]) -> None:
-        self._layers["builtin"] = {k: {"zh": v} for k, v in entries.items() if v}
+        self._layers["builtin"] = {k: v for k, v in entries.items() if v}
         self._invalidate()
 
     def set_user(self, entries: Dict[str, str], locked: bool = False) -> None:
         name = "user_locked" if locked else "user"
-        self._layers[name] = {k: {"zh": v} for k, v in entries.items() if v}
+        self._layers[name] = {k: v for k, v in entries.items() if v}
         self._invalidate()
 
     def upsert_user(self, key: str, zh: str, locked: Optional[bool] = None) -> None:
@@ -143,10 +185,10 @@ class DictStore:
         cur_locked = key in self._layers["user_locked"]
         target_locked = cur_locked if locked is None else locked
         if target_locked:
-            self._layers["user_locked"][key] = {"zh": zh}
+            self._layers["user_locked"][key] = zh
             self._layers["user"].pop(key, None)
         else:
-            self._layers["user"][key] = {"zh": zh}
+            self._layers["user"][key] = zh
             self._layers["user_locked"].pop(key, None)
         self._invalidate()
 
@@ -192,10 +234,10 @@ class DictStore:
         if not ok:
             raise PackError(msg)
         pack_id = pack.pack_id
-        entries = {k: dict(v) for k, v in pack.entries.items() if v.get("zh")}
+        entries = _compact_pack({k: v for k, v in pack.entries.items() if v.get("zh")})
 
         # 相同 id 的包整包替换，独立的用户词条层保留。
-        self._layers["pack"][pack_id] = entries
+        self._pack_entries[pack_id] = entries
         info = PackInfo(
             pack_id=pack_id,
             name=pack.name,
@@ -222,14 +264,18 @@ class DictStore:
     def remove_pack(self, pack_id: str) -> bool:
         before = len(self.packs)
         self.packs = [p for p in self.packs if p.pack_id != pack_id]
-        self._layers["pack"].pop(pack_id, None)
+        self._pack_entries.pop(pack_id, None)
         self._invalidate()
         return len(self.packs) != before
 
     # ---------- 裁决 ----------
 
-    def _invalidate(self) -> None:
+    def clear_resolution_cache(self) -> None:
+        """Release the derived resolutions while retaining layers and revision."""
         self._resolution_cache = None
+
+    def _invalidate(self) -> None:
+        self.clear_resolution_cache()
         self.revision += 1
 
     def resolve(self) -> Dict[str, Resolution]:
@@ -241,16 +287,17 @@ class DictStore:
           改成顺序覆盖后只需 2 万次赋值，实测 4ms。
           正确性等价：后写入的层优先级更高，直接覆盖即可。
         """
-        if self._resolution_cache is not None:
-            return self._resolution_cache
+        cached = self._resolution_cache
+        if cached is not None:
+            return cached
 
         out: Dict[str, Resolution] = {}
         # 局部绑定：省掉 2 万次属性查找
         _Res = Resolution
 
         # ① 内置表（最低）
-        for k, v in self._layers["builtin"].items():
-            out[k] = _Res(k, v["zh"], "builtin", 0, False)
+        for k, zh in self._layers["builtin"].items():
+            out[k] = _Res(k, zh, "builtin", 0, False)
 
         # ② 词典包：按导入顺序，后者覆盖前者
         if self.packs:
@@ -259,16 +306,22 @@ class DictStore:
                 if p.pack_id not in enabled:
                     continue
                 note = p.name
-                for k, v in self._layers["pack"].get(p.pack_id, {}).items():
-                    out[k] = _Res(k, v["zh"], "pack", int(v.get("priority", 50)), False, note)
+                for k, entry in self._pack_entries.get(p.pack_id, {}).items():
+                    if isinstance(entry, _PackEntry):
+                        zh = entry.zh
+                        priority = 50 if entry.priority is _MISSING else entry.priority
+                    else:
+                        zh = entry["zh"]
+                        priority = entry.get("priority", 50)
+                    out[k] = _Res(k, zh, "pack", int(priority), False, note)
 
         # ③ 用户词条
-        for k, v in self._layers["user"].items():
-            out[k] = _Res(k, v["zh"], "user", 100, False)
+        for k, zh in self._layers["user"].items():
+            out[k] = _Res(k, zh, "user", 100, False)
 
         # ④ 用户锁定词条（最高）
-        for k, v in self._layers["user_locked"].items():
-            out[k] = _Res(k, v["zh"], "user_locked", 999, True)
+        for k, zh in self._layers["user_locked"].items():
+            out[k] = _Res(k, zh, "user_locked", 999, True)
 
         self._resolution_cache = out
         return out
@@ -288,16 +341,16 @@ class DictStore:
     def save(self, path: str) -> None:
         obj = {
             "schema": "aeloc-store/1",
-            "builtin": {k: v["zh"] for k, v in self._layers["builtin"].items()},
-            "user": {k: v["zh"] for k, v in self._layers["user"].items()},
-            "user_locked": {k: v["zh"] for k, v in self._layers["user_locked"].items()},
+            "builtin": self._layers["builtin"].copy(),
+            "user": self._layers["user"].copy(),
+            "user_locked": self._layers["user_locked"].copy(),
             "packs": [
                 {
                     "id": p.pack_id, "name": p.name, "version": p.version,
                     "author": p.author, "license": p.license, "entries": p.entries,
                     "glossary": p.glossary, "signed": p.signed,
                     "verify_msg": p.verify_msg, "enabled": p.enabled, "order": p.order,
-                    "data": self._layers["pack"].get(p.pack_id, {}),
+                    "data": self._pack_entries.get(p.pack_id, {}),
                 }
                 for p in self.packs
             ],
@@ -305,7 +358,7 @@ class DictStore:
         os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(obj, f, ensure_ascii=False)
+            json.dump(obj, f, ensure_ascii=False, default=_PackEntry.as_json)
         os.replace(tmp, path)
 
     @classmethod
@@ -315,11 +368,10 @@ class DictStore:
             return st
         with open(path, "r", encoding="utf-8") as f:
             obj = json.load(f)
-        st._layers["builtin"] = {k: {"zh": v} for k, v in (obj.get("builtin") or {}).items()}
-        st._layers["user"] = {k: {"zh": v} for k, v in (obj.get("user") or {}).items()}
-        st._layers["user_locked"] = {k: {"zh": v} for k, v in (obj.get("user_locked") or {}).items()}
+        for layer in st._layers:
+            st._layers[layer] = obj.get(layer) or {}
         for p in obj.get("packs") or []:
-            st._layers["pack"][p["id"]] = p.get("data") or {}
+            st._pack_entries[p["id"]] = _compact_pack(p.get("data") or {})
             st.packs.append(
                 PackInfo(
                     pack_id=p["id"], name=p.get("name", ""), version=p.get("version", ""),

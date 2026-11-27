@@ -932,9 +932,10 @@ def control_status() -> dict:
         return {}
 
 
-def profile_runtime_confirmed() -> bool:
+def profile_runtime_confirmed(status=None) -> bool:
     """A current control receipt belongs to this data root and a live runtime."""
-    status = control_status()
+    if status is None:
+        status = control_status()
     if status.get("protocol") != "aeloc-managed-guard/1" or status.get("control_ready") is not True:
         return False
     try:
@@ -944,6 +945,85 @@ def profile_runtime_confirmed() -> bool:
     except (KeyError, TypeError, ValueError, OverflowError):
         return False
     return pid > 0 and ctime > 0 and 0 <= age <= 90 and _proc_creation_time(pid) == ctime
+
+
+def _profile_runtime_mutex_exists() -> bool:
+    """The running service creates this mutex for its actual configuration directory."""
+    import ctypes
+    import hashlib
+    from ctypes import wintypes
+
+    profile_hash = hashlib.sha256(os.path.abspath(DATA_ROOT).encode("utf-8")).hexdigest()[:24]
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.OpenMutexW.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR]
+    kernel.OpenMutexW.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    handle = kernel.OpenMutexW(0x00100000, False, "Global\\AeLocalizerManagedGuard-" + profile_hash)
+    if not handle:
+        return False
+    kernel.CloseHandle(handle)
+    return True
+
+
+def active_language_session():
+    """Identify an already applied language service on the current desktop and profile."""
+    from . import proc
+
+    status = control_status()
+    if (status.get("mode") != "on" or status.get("language_ready") is not True
+            or not profile_runtime_confirmed(status)):
+        return None
+    try:
+        generation = int(status["gen"])
+        if generation <= 0 or status.get("applied_gen") != generation or status.get("ack_gen") != generation:
+            return None
+        pid = int(status["runtime_pid"])
+        created = int(status["runtime_ctime"])
+        lock = os.path.join(DATA_ROOT, "guard_runtime", "out", "guard.lock")
+        identity = _guard_side_identity(lock, pid)
+        if (not identity or identity[2] != created or not _profile_runtime_mutex_exists()
+                or read_guard_lock(stale_ok=True) != pid):
+            return None
+        host = status["host"]
+        hosts = proc.list_ae_hosts()
+        if len(hosts) != 1:
+            return None
+        live = hosts[0]
+        if (host["pid"] != live["pid"] or not host["ctime"] or host["ctime"] != live["creation_time"]
+                or os.path.normcase(host["image"]) != os.path.normcase(live["image"])
+                or not proc.main_window(live["pid"])):
+            return None
+        return {"runtime_pid": pid, "runtime_ctime": created, "host_pid": live["pid"],
+                "host_ctime": live["creation_time"], "host_image": os.path.normcase(live["image"]),
+                "gen": generation}
+    except (KeyError, OSError, RuntimeError, TypeError, ValueError):
+        return None
+
+
+def background_language_session():
+    """Recognise a deliberate UI close only while that very same language session is active."""
+    from . import settings
+
+    config = settings.load(DATA_ROOT)
+    marker = config.get("background_language_session")
+    if (not isinstance(marker, dict) or config.get("engine_master_intent") is False
+            or config.get("language_intent") is False):
+        return None
+    current = active_language_session()
+    return current if current is not None and current == marker else None
+
+
+def background_on_ae_startup():
+    from . import settings
+    config = settings.load(DATA_ROOT)
+    return (config.get("background_on_ae_startup") is True
+            and config.get("engine_master_intent") is not False)
+
+
+def request_foreground_window():
+    from . import settings
+    if settings.get(DATA_ROOT, "background_on_ae_startup", False):
+        settings.put(DATA_ROOT, "background_on_ae_startup", False)
 
 
 def request_reload() -> bool:

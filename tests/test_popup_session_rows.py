@@ -84,6 +84,29 @@ class PopupRowOwnershipTest(unittest.TestCase):
             session.scan(prefer_current=True)
         self.assertTrue(rows.call_args.kwargs["prefer_current"])
 
+    def test_reobserved_record_moves_to_end_and_reused_pointer_blocks_both_owners(self):
+        session = self._session()
+        first, second = _rows()
+        rows = [first, second, first]
+        profile = SimpleNamespace(version="v", flt_sha="f", tdb_sha="t", encoding="gbk")
+        with mock.patch("core.paramdiscovery.parameter_rows",
+                        side_effect=lambda *a, **kw: (profile, rows, set(), True)), \
+             mock.patch("core.proc.virtual_query",
+                        return_value=SimpleNamespace(Type=0x20000, Protect=4)), \
+             mock.patch("core.popup_fields.read_cstring",
+                        side_effect=[b"A|B", b"C|D", b"E|F", b"G|H"]):
+            records = session.scan()
+            self.assertEqual([(r["matchName"], r["raw"]) for r in records],
+                             [("p2", b"C|D"), ("p1", b"E|F")])
+            self.assertTrue(session.discovery_pending)
+
+            previous_baseline = dict(session.baseline[0x300])
+            rows[:] = [dict(first, matchName="replacement")]
+            records = session.scan(visible_streams=(first["address"],))
+            self.assertEqual([r["matchName"] for r in records], ["p2"])
+            self.assertEqual(session.errors, ["alias-conflict:300"])
+            self.assertEqual(session.baseline[0x300], previous_baseline)
+
     def test_late_unlinked_record_cannot_apply(self):
         s = self._session()
         rows = _rows()

@@ -9,24 +9,12 @@ ColumnLayout {
     property var backend: null
     property var warnings: []
     property var compatibilityIssues: []
-    property bool effectEnabled: true
-    property bool languageEnabled: true
 
-    readonly property bool running: !!backend && backend.engineRunning
-    readonly property bool busy: !!backend && backend.busy
+    readonly property var session: backend ? backend.engineSessionView : null
+    readonly property bool running: !!session && session.running
+    readonly property bool busy: !!backend && (backend.busy || !!session && session.busy)
 
     spacing: Theme.spaceMd
-
-    function refreshChannels() {
-        if (!backend)
-            return
-        const states = backend.channelState()
-        if (states && states.length === 3) {
-            effectEnabled = states[0]
-            // 参数名和下拉值共用语言开关，后端同步更新两者。
-            languageEnabled = states[1]
-        }
-    }
 
     function refreshChecks() {
         if (!backend)
@@ -38,22 +26,12 @@ ColumnLayout {
         compatibilityIssues = backend.compatIssues() || []
     }
 
-    Component.onCompleted: {
-        refreshChannels()
-        refreshChecks()
-    }
-    onVisibleChanged: if (visible) {
-        refreshChannels()
-        refreshChecks()
-    }
+    Component.onCompleted: refreshChecks()
+    onVisibleChanged: if (visible) refreshChecks()
 
     Connections {
         target: card.backend
-        function onStateChanged() { card.refreshChannels() }
-        function onInventoryChanged() {
-            card.refreshChannels()
-            card.refreshChecks()
-        }
+        function onInventoryChanged() { card.refreshChecks() }
     }
 
     component Panel: Rectangle {
@@ -173,12 +151,12 @@ ColumnLayout {
                                 width: 6
                                 height: 6
                                 radius: 3
-                                color: card.backend && card.backend.engineProfileConfirmed ? Theme.success : Theme.textTertiary
+                                color: card.session && card.session.confirmed ? Theme.success : Theme.textTertiary
                             }
 
                             BodyText {
                                 objectName: "engineRunningStatus"
-                                text: card.backend ? card.backend.engineProfileStatus : "引擎未运行"
+                                text: card.session ? card.session.summary : "引擎未运行"
                                 color: Theme.textPrimary
                             }
                         }
@@ -252,12 +230,18 @@ ColumnLayout {
                     objectName: "engineEffectSwitch"
                     text: "效果名"
                     enabled: !!card.backend
-                    checked: card.effectEnabled
+                    checked: !!card.session && card.session.effectRequested
+                    onToggled: card.backend.setChannelAuto("effect", checked)
+                }
 
-                    onToggled: {
-                        card.effectEnabled = checked
-                        card.backend.setChannelAuto("effect", checked)
-                    }
+                BodyText {
+                    objectName: "engineEffectStatus"
+                    Layout.fillWidth: true
+                    Layout.leftMargin: Theme.spaceSm
+                    Layout.rightMargin: Theme.spaceSm
+                    Layout.bottomMargin: visible ? Theme.spaceSm : 0
+                    text: card.session ? card.session.effectStatus : ""
+                    visible: text.length > 0
                 }
 
                 Rectangle {
@@ -272,12 +256,18 @@ ColumnLayout {
                     objectName: "engineLanguageSwitch"
                     text: "参数名与下拉值"
                     enabled: !!card.backend
-                    checked: card.languageEnabled
+                    checked: !!card.session && card.session.languageRequested
+                    onToggled: card.backend.setChannelAuto("lang", checked)
+                }
 
-                    onToggled: {
-                        card.languageEnabled = checked
-                        card.backend.setChannelAuto("lang", checked)
-                    }
+                BodyText {
+                    objectName: "engineLanguageStatus"
+                    Layout.fillWidth: true
+                    Layout.leftMargin: Theme.spaceSm
+                    Layout.rightMargin: Theme.spaceSm
+                    Layout.bottomMargin: visible ? Theme.spaceSm : 0
+                    text: card.session ? card.session.languageStatus : ""
+                    visible: text.length > 0
                 }
             }
         }

@@ -244,23 +244,21 @@ class PopupSession:
                 str(rec.get("effectMatchName") or ""),
                 str(rec.get("matchName") or ""))
 
-    def _merge_record(self, rec, blocked):
-        if rec["pointer"] in blocked:
+    def _merge_record(self, records_by_pointer, rec, blocked):
+        ptr = int(rec["pointer"])
+        if ptr in blocked:
             return
         key = self._rec_key(rec)
-        same_ptr = [r for r in self.records
-                    if int(r["pointer"]) == int(rec["pointer"])]
-        for old in same_ptr:
-            if self._rec_key(old) != key:
-                blocked.add(int(rec["pointer"]))
-                self.errors.append("alias-conflict:%x" % int(rec["pointer"]))
-                self.records = [r for r in self.records
-                                if int(r["pointer"]) != int(rec["pointer"])]
-                self._pass_seen.discard(self._rec_key(old))
+        # Reinsert refreshed records at the end, preserving their scan order.
+        old = records_by_pointer.pop(ptr, None)
+        if old is not None:
+            old_key = self._rec_key(old)
+            if old_key != key:
+                blocked.add(ptr)
+                self.errors.append("alias-conflict:%x" % ptr)
+                self._pass_seen.discard(old_key)
                 return
-        self.records = [r for r in self.records
-                        if self._rec_key(r) != key]
-        self.records.append(rec)
+        records_by_pointer[ptr] = rec
         self._pass_seen.add(key)
 
     def scan(self, *, prefer_current=False, visible_streams=()):
@@ -325,6 +323,7 @@ class PopupSession:
             self._row_cursor = max(0, min(int(self._row_cursor), len(rows)))
             self.rows_truncated = False
             idx = self._row_cursor
+            records_by_pointer = {int(r["pointer"]): r for r in self.records}
             while idx < len(rows):
                 if time.monotonic() > row_deadline:
                     self.rows_truncated = True
@@ -411,15 +410,14 @@ class PopupSession:
                            "original": base.get("original", base["raw"]),
                            "text": text,
                            "capacity": base["capacity"]}
-                    self._merge_record(rec, blocked)
+                    self._merge_record(records_by_pointer, rec, blocked)
                 except Exception:
                     continue
             self._row_cursor = idx
             self._pass_blocked = set(blocked)
-            if blocked:
-                # A shared pointer conflict blocks every owner of that buffer.
-                self.records = [r for r in self.records
-                                if int(r["pointer"]) not in blocked]
+            for ptr in blocked:
+                records_by_pointer.pop(ptr, None)
+            self.records = list(records_by_pointer.values())
             # Commit baseline only after ambiguity resolution. A conflicting
             # pointer keeps the prior trustworthy owner/baseline untouched.
             for ptr, (base, bkey) in candidate_bases.items():
@@ -431,8 +429,7 @@ class PopupSession:
             if full_pass and not pending:
                 # Only a complete non-pending current pass may remove owners.
                 self.records = [r for r in self.records
-                                if self._rec_key(r) in self._pass_seen
-                                and int(r["pointer"]) not in blocked]
+                                if self._rec_key(r) in self._pass_seen]
             if full_pass:
                 self._row_cursor = 0
                 self._pass_active = False

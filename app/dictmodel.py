@@ -17,7 +17,7 @@
 """
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Iterable, List, Optional
 
 from PySide6.QtCore import QAbstractListModel, QModelIndex, Qt
 
@@ -85,18 +85,29 @@ class DictListModel(QAbstractListModel):
 
     # ---------- 数据 ----------
 
-    def setRows(self, rows: List[dict]):
+    def setRows(self, rows: Iterable[dict]) -> int:
         """整体重建（扫描词典库后 / 载入词典包后调用）。
 
         rows: [{"en", "zh", "layer", "gauge"}, …]，保持传入顺序。
         """
-        self.beginResetModel()
-        self._all = [
+        entries = [
             _Entry(str(d.get("en", "")), str(d.get("zh", "")),
                    str(d.get("layer", "")), str(d.get("gauge", "")))
             for d in rows
         ]
+        self.beginResetModel()
+        self._all = entries
         self._rows = self._filtered()
+        self.endResetModel()
+        return len(entries)
+
+    def clear(self) -> None:
+        if not self._all and not self._kw:
+            return
+        self.beginResetModel()
+        self._all = []
+        self._rows = []
+        self._kw = ""
         self.endResetModel()
 
     def _filtered(self) -> List[_Entry]:

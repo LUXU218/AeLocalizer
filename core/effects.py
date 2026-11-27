@@ -151,7 +151,7 @@ def merge_into_store(store, table: Dict[str, str]) -> int:
     added = 0
     for k, v in table.items():
         if k not in builtin:
-            builtin[k] = {"zh": v}
+            builtin[k] = v
             added += 1
     if added:
         store._layers["builtin"] = builtin
