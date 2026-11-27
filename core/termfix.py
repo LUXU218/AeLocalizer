@@ -69,7 +69,7 @@ TERM_FIXES: Dict[str, str] = {
     "Roughness": "粗糙度",          # 与 Roughness Scale=粗糙度缩放 对齐
     # Wrap 在 AE 的平铺类参数里是"拼贴"（词典里已有的整条枚举
     # "…|Wrap X|Wrap Y|…" -> "…|X 拼贴|Y 拼贴|…" 就是依据），
-    # 之前按字面译成"环绕"与同族不一致 —— 用户截图报的就是这两条。
+    # 统一轴向枚举中的译法，避免同系列混用「环绕」和「拼贴」。
     "Wrap X": "X 拼贴",
     "Wrap Y": "Y 拼贴",
     "Wrap Z": "Z 拼贴",

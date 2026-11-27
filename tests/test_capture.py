@@ -254,9 +254,8 @@ class TestCapture(unittest.TestCase):
     def test_capture_blocked_when_ae_not_running(self):
         """★ 2026-11-02:AE 没开时不得把上一次会话的采集快照当缺词。
 
-        采集文件是守护每会话一份、启动时才清 —— AE 关掉后文件还在，旧逻辑
-        会照读，用户实测「不打开 AE 点提取也能提取」。生产闸门用
-        aelaunch.ae_running() 把关；沙盒/测试进程不受影响。
+        守护只在启动新会话时清理采集文件。AE 关闭后旧快照仍在，生产环境
+        使用 aelaunch.ae_running() 避免从已结束的会话提取。
         """
         import unittest.mock as mock
         from core import aelaunch
@@ -339,7 +338,7 @@ class TestCapture(unittest.TestCase):
     def test_capture_same_form_placeholder_is_missing(self):
         """★ 2026-11-02 同形占位(zh==en)不算已译,必须重新列出。
 
-        用户实测 BCC 单润的 PreBlur/PostBlur 一直是英文,补词却只有 5 行:
+        BCC 的 PreBlur 和 PostBlur 会触发原样写入：
         引擎把 PreBlur 写回 PreBlur 也算改名成功,renamed_names.json 声称
         已译,旧逻辑命中改名名单直接跳过。zh==en 的条目其实是「没有翻译」,
         AE 里仍是英文 → 必须当成缺词列出来。纯缩写(RGB)保留原文,不算缺词。

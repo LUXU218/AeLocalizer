@@ -170,10 +170,8 @@ class SettingsUiMixin:
                                 if isinstance(v, dict) and str(k):
                                     clean[str(k)] = {str(a): b for a, b in list(v.items())[:8]}
                             self._weTune = clean
-                    # ★ 迁移（2026-11-16）：老配置有背景但没有画面调节参数。
-                    #   那种配置在「满屏磨砂玻璃」模型下就是一张没有模糊的壁纸
-                    #   直接压在文字底下（用户报的「背景看不到、界面怪」）。
-                    #   补一次玻璃档默认值；只做一次，之后按用户自己调的来。
+                    # 旧配置可能只有未模糊的背景图，影响文字可读性。
+                    # 首次迁移缺少画面调节参数的配置时补上默认值。
                     if "bg_blur" not in obj and (self._bgVideo or self._bgImage):
                         if "bg_dim" not in obj:
                             self._bgDim = 0.22
@@ -430,9 +428,7 @@ class SettingsUiMixin:
 
     # ---- 字体与文字颜色（2026-11-16）----
     #
-    # ★ 为什么需要：满屏磨砂玻璃下，静态壁纸有亮有暗，把卡片刷成白底虽然能读
-    #   但「一块块白矩形」很割裂（用户明确否掉了）。正确解法是**让文字颜色
-    #   可自定义** —— 浅色壁纸配深字、深色壁纸配浅字，界面保持通透自然。
+    # 壁纸亮度不同。允许设置文字颜色，便于在浅色或深色背景上保持可读性。
 
     @Property(str, notify=appearanceChanged)
     def uiFont(self):

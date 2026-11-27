@@ -1,8 +1,6 @@
 """效果名编辑器：列出所有插件的效果名 + 当前译文，供用户直接改。
 
-★★ 2026-10-22 用户需求：
-  「加一个能让用户实时修改所有插件名称的界面，可以直接在 AI 翻译之后
-   也能进行修改，也可以用户自行修改」
+效果名编辑器支持新增译名和修订 AI 译文。
 
   为什么必须要有：早期一批 AI 翻译质量很差，例如
       BCC Primatte Studio  ->  BCC 镜数幕
@@ -34,7 +32,7 @@ class NameRow:
     file: str = ""          # 文件名
     path: str = ""          # 完整路径
     vendor: str = ""        # 厂商分组
-    #: 插件套装名（2026-10-23 用户要求「随插件套装名分隔开」）。
+    #: 插件套装名，用作列表分组。
     #:
     #: 取值来自 Inventory 的组 label（去掉 " (478 个效果)" 这种计数尾巴），
     #: 例如 Continuum / MochaPro / Red Giant Universe / Particular / Twirl。
@@ -44,7 +42,7 @@ class NameRow:
     locked: bool = False     # 用户锁定过（不再被 AI 覆盖）
     #: 同名的其他文件数（0 = 只有这一个文件）。
     #:
-    #: ★ 2026-10-23 用户问「为什么有两个完全一样的」：
+    #: 相同展示名可能来自普通版本和转场预设版本：
     #:   BCC 有 51 个效果存在「普通版 + PrTr 转场预设版」两套 aex，
     #:   例如 BCCBlobsWipe.aex 和 BCCBlobsWipePrTr.aex，
     #:   两者的 PiPL display_name 完全相同。
@@ -87,7 +85,7 @@ _COUNT_SUFFIX = re.compile(r"\s*\(\s*\d+\s*个效果\s*\)\s*$")
 def suite_of(group) -> str:
     """从 Inventory 组里取「插件套装名」。
 
-    ★ 2026-10-23 用户要求「按插件套装名分隔开」：
+    归并插件套装分类并清除统计后缀：
       · label 尾巴上的 " (478 个效果)" 是统计信息，去掉
       · Sapphire 的 10 个组是【分类】（Blur+Sharpen / Distort / Lighting…），
         不是不同套装 —— 统一归成 "Sapphire"，否则同一个套装会被拆成 10 块

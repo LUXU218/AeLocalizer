@@ -213,15 +213,14 @@ def check_untranslated(en: str, zh: str) -> bool:
 def check_too_short(en: str, zh: str) -> Tuple[bool, str]:
     """闸 4.5：译文短到没有意义。
 
-    ★★ 2026-10-23 用户报「BCC DeGrain OBS 的译文是 BCC BC」：
-       查缓存发现 1064 条里有【102 条就是 "BC"】—— 模型在某些批次上抽风，
-       把 "BCC DeGrain OBS" 吐成了缩写残渣 "BC"。
+    2026-10-23：1064 条缓存中有 102 条译文为 BC，例如 BCC DeGrain OBS。
+    需要在 AI 结果进入缓存与词典前拦截无意义的缩写。
 
        原来没有任何一道闸拦它：
          · 不是原样返回英文（check_untranslated 放过）
          · 长度 2 字节，PiPL 槽位绰绰有余（check_length 放过）
          · _is_junk 只在"缩短候选"里筛，AI 直接返回的垃圾它管不到
-       于是 "BC" 顺利进缓存、进草稿、进词典，用户看到一片 BC。
+       因此无意义的 BC 曾进入缓存、草稿和词典。
 
        判据（只拦明显无意义的）：
          · 纯 ASCII 且 < 3 字符        -> "BC" / "A" / "xy"
@@ -278,8 +277,7 @@ def check_encoding(zh: str) -> Tuple[bool, str]:
 
 #: 厂商/系列前缀。原文有、译文也必须保留。
 #:
-#: ★★ 2026-10-23 用户报「翻译质量有问题啊前缀全都没了」：
-#:   实测草稿里是
+#: 缺少前缀校验时，草稿曾丢失厂商和系列标识，例如：
 #:        S_Cartoon      -> 卡通          （应为 S_卡通）
 #:        S_ColorFuse    -> 色彩          （应为 S_色彩）
 #:        S_EdgeDetect   -> 边缘检测      （应为 S_边缘检测）
