@@ -1,6 +1,39 @@
-"""Native resize and title bar handling for the Windows QML window."""
+"""Rendering and native frame handling for Windows QML windows."""
+
+import os
+from functools import cache
 
 from PySide6.QtCore import QAbstractNativeEventFilter, Qt
+
+
+@cache
+def configure_workspace_renderer():
+    """Select the renderer before this process creates its first Qt Quick window."""
+    from PySide6.QtGui import QGuiApplication
+
+    if (QGuiApplication.platformName() != "windows" or os.environ.get("QSG_RHI_BACKEND")
+            or os.environ.get("QT_QUICK_BACKEND")):
+        return
+
+    from PySide6.QtGui import QOffscreenSurface, QOpenGLContext
+    from PySide6.QtQuick import QQuickWindow, QSGRendererInterface
+
+    context = QOpenGLContext()
+    if not context.create() or context.isOpenGLES() or context.format().majorVersion() < 3:
+        return
+    surface = QOffscreenSurface()
+    surface.setFormat(context.format())
+    surface.create()
+    if not surface.isValid() or not context.makeCurrent(surface):
+        return
+    try:
+        renderer = context.functions().glGetString(0x1F01)  # GL_RENDERER
+    finally:
+        context.doneCurrent()
+
+    software = ("gdi generic", "llvmpipe", "softpipe", "swiftshader", "software rasterizer", "basic render driver")
+    if renderer and not any(name in str(renderer).lower() for name in software):
+        QQuickWindow.setGraphicsApi(QSGRendererInterface.OpenGL)
 
 
 class WindowsSizeMoveFilter(QAbstractNativeEventFilter):

@@ -10,10 +10,8 @@
        except Exception:
            pass
 
-   ImportError 被那个 except 吞掉 -> 「启动时自动点掉 Mocha 许可证框 /
-   崩溃修复框」这条路径**一直是死的**。AE 一被对话框挡住，launch_ae 只能
-   干等到 30 秒超时，用户看到的就是「每次进入 AE 都要很久」「AE 打不开」。
-   现在补回本模块，并把实现统一到 core.aelaunch（避免两套逻辑各自漂移）。
+   启动器吞掉 ImportError 后无法处理启动对话框，AE 被挡住时会一直等到
+   30 秒超时。对话框处理统一由 core.aelaunch 实现。
 """
 from __future__ import annotations
 

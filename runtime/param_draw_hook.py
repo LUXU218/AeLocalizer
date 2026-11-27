@@ -885,6 +885,36 @@ function layerPopupLeave() {
     else LAYER_SCOPES[tid] = this.layerPrevious;
     MENU_ACTIVE--;
 }
+function streamPopupEnter(args, builder, tdb, flt, effectParade) {
+    var tid = this.threadId;
+    this.layerPrevious = LAYER_SCOPES[tid];
+    LAYER_SCOPES[tid] = null;
+    MENU_ACTIVE++;
+    if (!WANT) return;
+    try {
+        var stream = args[builder.argument], names = [];
+        for (var i = 0; i < 16 && !stream.isNull(); i++) {
+            var table = stream.readPointer();
+            var name;
+            if (effectParade && table.equals(effectParade)) {
+                name = 'ADBE Effect Parade';
+            } else {
+                if (!insideModule(table, tdb) && !insideModule(table, flt)) break;
+                name = LAYER_READER.name(stream.add(8)).readUtf8String();
+            }
+            names.push(name);
+            if (name === 'ADBE Effect Parade') {
+                var key = effectScopeKey(names.reverse());
+                if (key) LAYER_SCOPES[tid] = {key:key};
+                break;
+            }
+            stream = stream.add(32).readPointer();
+        }
+    } catch (e) { MENU_ERR++; MENU_LAST = 'stream-popup:' + String(e); }
+}
+function insideModule(address, module) {
+    return !!module && address.compare(module.base) >= 0 && address.compare(module.base.add(module.size)) < 0;
+}
 function layerLabelCall(args) {
     var scope = LAYER_SCOPES[this.threadId];
     if (!WANT || !scope || !this.returnAddress.equals(LAYER_RETURN)) return;
@@ -941,6 +971,25 @@ function setupLayerPopup() {
         listeners.forEach(function (listener) { listener.detach(); });
         throw e;
     }
+    var stream = p.stream_scopes;
+    if (!stream) return;
+    try {
+        var tdb = findModule(['TDB.dll']), flt = findModule(['FLT.dll']);
+        var bee = findModule(['BEE.dll']), effectParade = null;
+        if (bee && bee.path.toLowerCase().slice(0, -'bee.dll'.length) ===
+                   lib.path.toLowerCase().slice(0, -'afterfxlib.dll'.length)) {
+            effectParade = exportAddr(bee, '??_7BEE_EffectParade@@6B@');
+        }
+        verifiedPopupExport(tdb, stream.accessors.match);
+        verifiedPopupExport(tdb, stream.accessors.parent);
+        stream.builders.forEach(function (builder) {
+            var entry = lib.base.add(builder.rva), site = lib.base.add(builder.call_rva);
+            if (hexAt(entry, builder.bytes.length / 2) !== builder.bytes ||
+                hexAt(site, builder.call_bytes.length / 2) !== builder.call_bytes) return;
+            Interceptor.attach(entry, {onEnter:function (args) { streamPopupEnter.call(this, args, builder, tdb, flt, effectParade); },
+                                       onLeave:layerPopupLeave});
+        });
+    } catch (e) { MENU_LAST = 'stream-popup-attach:' + String(e); }
 }
 
 var popupActivityVT = null, popupActivitySeen = {}, popupActivityCount = 0;
@@ -1184,9 +1233,8 @@ class ParamDrawHook:
         # 2026+ Effect Controls labels are drawn by dvaui UI_StaticText, not
         # by EDB_DrawString.
         #
-        # ★★ 2026-11-19 用户指出：**同一年份有多个构建号，不能写死白名单**。
-        #   旧逻辑只在 known_version ∈ TEXT_LABEL_VERSIONS 时安装这条额外钩子，
-        #   于是 26.6.x 之类的新构建直接没有参数名汉化。
+        # 同一 AE 年份有多个构建。仅对 TEXT_LABEL_VERSIONS 安装额外钩子
+        # 会遗漏例如 26.6.x 的新构建及其参数名汉化。
         #   现在改成**按结构自适应**：只要 dvaui.dll 在，就试着解析出
         #   UI_StaticText::Draw 与 GetTextString（导出唯一性 + 序言字节 + 偏移合理
         #   + 已知构建的历史值自检）；结构对不上就安静退回经典路径。

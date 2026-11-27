@@ -183,6 +183,7 @@ def run_settings_workspace(qml_dir):
     from PySide6.QtCore import QUrl
     from PySide6.QtGui import QFontDatabase, QGuiApplication
     from PySide6.QtQml import QQmlApplicationEngine
+    from app.windows_frame import configure_workspace_renderer
 
     try:
         input_pipe = _pipe_stream(0)
@@ -247,6 +248,7 @@ def run_settings_workspace(qml_dir):
 
     app = QGuiApplication([])
     app.setApplicationName("AeLocalizer")
+    configure_workspace_renderer()
     view = SettingsView()
     engine = QQmlApplicationEngine()
     engine.addImportPath(qml_dir)

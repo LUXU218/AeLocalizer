@@ -177,15 +177,21 @@ EXCLUDES = [
 ]
 
 
-def build_startup_helper(directory: Path) -> Path:
-    compiler = shutil.which("x86_64-w64-mingw32-gcc") or shutil.which("gcc")
-    if not compiler:
-        raise RuntimeError("构建登录待机程序需要 64 位 MinGW-w64 GCC，请将 bin 目录加入 PATH。")
+def build_startup_helper(directory: Path, compiler: str) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
     output = directory / "AeLocalizerStartup.exe"
     subprocess.run([compiler, "-std=c11", "-Os", "-Wall", "-Wextra", "-municode", "-mwindows",
                     "-s", "-o", str(output), str(Path(ROOT) / "native/startup.c"),
                     "-luser32", "-lshell32"], check=True)
+    return output
+
+
+def build_host_identity_helper(directory: Path, compiler: str) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    output = directory / "ae_host_identity.dll"
+    subprocess.run([compiler, "-std=c11", "-Os", "-Wall", "-Wextra", "-shared",
+                    "-s", "-o", str(output), str(Path(ROOT) / "native/ae_host_identity.c"),
+                    "-lkernel32"], check=True)
     return output
 
 
@@ -239,11 +245,16 @@ def main() -> int:
         print("[错误] 未安装 PyInstaller：pip install pyinstaller")
         return 2
 
+    compiler = shutil.which("x86_64-w64-mingw32-gcc") or shutil.which("gcc")
+    if not compiler:
+        raise RuntimeError("打包需要 64 位 MinGW-w64 GCC，请将 bin 目录加入 PATH。")
+
     for d in (DIST, BUILD):
         if os.path.isdir(d):
             shutil.rmtree(d, ignore_errors=True)
 
-    helper = build_startup_helper(Path(BUILD) / "startup")
+    helper = build_startup_helper(Path(BUILD) / "startup", compiler)
+    host_identity = build_host_identity_helper(Path(BUILD) / "native", compiler)
     qt_hooks = write_qt_runtime_hook(Path(BUILD) / "qt-hooks")
     manifest = write_windows_manifest(Path(BUILD))
     entry = os.path.join(ROOT, "app", "main.py")
@@ -261,6 +272,7 @@ def main() -> int:
     ]
     if onefile:
         cmd.append("--onefile")
+    cmd += ["--add-data", "%s%snative" % (host_identity, os.pathsep)]
     for src, dst in DATAS:
         if os.path.exists(src):
             cmd += ["--add-data", "%s%s%s" % (src, os.pathsep, dst)]

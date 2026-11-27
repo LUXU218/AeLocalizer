@@ -7,6 +7,47 @@ from runtime.param_draw_hook import JS, observe_js
 OBSERVE = observe_js()
 APP=QCoreApplication.instance() or QCoreApplication([])
 class PopupMenuScopeTests(unittest.TestCase):
+    def test_classic_stream_menu_translates_long_labels_using_the_live_effect_owner(self):
+        q = QJSEngine()
+        source = JS[JS.index('var LAYER_SCOPES ='):JS.index('function setupLayerPopup(')]
+        match = JS[JS.index('function effectPopupPath('):JS.index('function menuContext(')]
+        result = q.evaluate(r'''
+var WANT=true, MENU_ACTIVE=0, MENU_ERR=0, MENU_LAST='';
+var MAP={On:'开', 'First\x1fmode\x1fOn':'专属于第一个效果的较长译名'};
+function address(n){return {n:n, compare:function(other){return n-other.n;},
+    add:function(offset){return address(n+offset);}, equals:function(other){return n===other.n;}};}
+function stream(name, parent, table){return {isNull:function(){return false;},
+    readPointer:function(){return address(table||101);},
+    add:function(offset){return offset===8?name:{readPointer:function(){return parent;}};}};}
+function menuWS(value){return value;}
+function mkWS(value){return {obj:value};}
+''' + OBSERVE + match + source + r'''
+LAYER_READER={name:function(value){return {readUtf8String:function(){return value;}};}};
+LAYER_RETURN=42;
+var tdb={base:address(100),size:10};
+var root=stream('unused',null,300);
+var first=stream('mode',stream('First',root));
+var second=stream('mode',stream('Second',root));
+var foreign=stream('mode',stream('First',root),500);
+function translate(owner){
+    var scope={threadId:1};
+    streamPopupEnter.call(scope,[null,owner],{argument:1},tdb,null,address(300));
+    var output={}, selection=2, args=[output,'On',selection];
+    var call={threadId:1,returnAddress:{equals:function(other){return other===42;}}};
+    layerLabelCall.call(call,args);
+    layerLabelReturned.call(call);
+    layerPopupLeave.call(scope);
+    return [args[1],args[0]===output&&args[2]===selection];
+}
+var labels=[translate(first),translate(second),translate(foreign)];
+WANT=false;
+JSON.stringify([labels,translate(first),MENU_ACTIVE,MENU_ERR]);
+''')
+        self.assertFalse(result.isError(), result.toString())
+        self.assertEqual(result.toString(),
+                         '[[["专属于第一个效果的较长译名",true],["开",true],["On",true]],'
+                         '["On",true],0,0]')
+
     def test_layer_menu_converts_first_label_only_in_verified_scope(self):
         q = QJSEngine()
         start = JS.index('var LAYER_SCOPES =')

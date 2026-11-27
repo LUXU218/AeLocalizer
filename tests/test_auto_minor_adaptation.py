@@ -1,11 +1,14 @@
+import json
+import subprocess
 import unittest
+from pathlib import Path
 from dataclasses import replace
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from app.backend import AppBackend
-from core import adapter, aescan, proc
+from core import adapter, aescan, paramnative, proc
 from tests.fake_ae import FakeAE
 
 
@@ -18,6 +21,66 @@ class BackendFixture(SimpleNamespace):
 
 
 class AutoMinorAdaptationTest(unittest.TestCase):
+    def test_catalog_relay_is_closed_before_adoption_and_version_mismatch_is_rejected(self):
+        for version in ("24.6x2", "24.7x8"):
+            with self.subTest(version=version), TemporaryDirectory() as temp:
+                process = SimpleNamespace(pid=3, image="AfterFX.exe")
+                launcher = Mock(pid=4)
+                launcher.wait.side_effect = [subprocess.TimeoutExpired("AfterFX.exe", 3), 0]
+                catalog = [{"matchName": "Example"}]
+
+                def start(_args, **_kwargs):
+                    folder, = (Path(temp) / "ae-bridge").iterdir()
+                    (folder / "probe.json").write_text(
+                        json.dumps({"aeVersion": version, "catalog": catalog}), encoding="utf8")
+                    return launcher
+
+                with patch.object(paramnative, "data_root", return_value=temp), \
+                        patch.object(paramnative.subprocess, "Popen", side_effect=start):
+                    if version == "24.6x2":
+                        self.assertEqual(paramnative.probe_catalog(
+                            process, expected_version="24.6x2"), catalog)
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, "构建与当前编辑会话不一致"):
+                            paramnative.probe_catalog(process, expected_version="24.6x2")
+                self.assertEqual([call[0] for call in launcher.method_calls],
+                                 ["wait", "terminate", "wait"])
+                self.assertEqual(list((Path(temp) / "ae-bridge").iterdir()), [])
+
+    def test_failed_popup_verification_is_reported_for_new_and_cached_profiles(self):
+        version = "26.3.0.87"
+        host = {"pid": 400, "creation_time": 500, "image": "AfterFX.exe", "fileVersion": version}
+        error = "MediaFoundation popup option pointer layout changed"
+        adopted = {"adopted": True, "version": version, "encoding": "utf8", "popup_error": error}
+        for result in (adopted, {"popup_blocked": error}):
+            with self.subTest(result=result), patch("app.backend.QTimer.singleShot") as timer:
+                backend = BackendFixture(_busy=False, _run=Mock(), toast=Mock(), stateChanged=Mock(),
+                                         _live_watch_log=Mock(), _auto_restore_engine_async=Mock())
+                backend._auto_adapt_async(version, hosts=[host])
+                done = backend._run.call_args.args[1]
+                done(result)
+                level, message = backend.toast.emit.call_args.args
+                self.assertEqual(level, "warn")
+                self.assertIn(version, message)
+                self.assertIn("展开选项保留原文", message)
+                self.assertIn(error, message)
+                self.assertEqual(backend._autoAdaptStatus, message)
+                self.assertEqual(backend._autoAdaptPopupError, error)
+                if result.get("adopted"):
+                    timer.call_args.args[1]()
+                    backend._auto_restore_engine_async.assert_called_once_with(
+                        refresh_runtime=True, refresh_popup=False)
+                else:
+                    timer.assert_not_called()
+
+        backend = BackendFixture(_running_ae_version=Mock(return_value=version),
+                                 _adapt_running_ae=Mock(return_value=adopted), toast=Mock())
+        with patch.object(adapter, "is_supported", return_value=False):
+            AppBackend._ensure_adapted(backend)
+        level, message = backend.toast.emit.call_args.args
+        self.assertEqual(level, "warn")
+        self.assertIn(error, message)
+
     def test_catalog_not_ready_can_retry_in_same_session(self):
         host = {"pid": 400, "creation_time": 500, "image": "AfterFX.exe", "fileVersion": "22.2.0.120"}
         adapt = Mock(side_effect=[TimeoutError("目录尚未准备好"),

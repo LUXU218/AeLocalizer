@@ -2,8 +2,9 @@
 
 把请求嵌入 jsx/parameter_bridge.jsx(@@REQUEST@@ 占位符),经
 AfterFX.exe -r 转交给 AE 自己执行;AE 内脚本先校验进程身份(pid/创建
-时间/路径,经 ae_host_identity.dll),再加载 ae_parameters.dll 写
-PF 内联名字缓冲 + TDB SetDisplayName。本模块只负责:构造请求、转交、
+时间/路径,经 ae_host_identity.dll)。读取参数时由脚本直接读取工程；
+写参数名时加载 ae_parameters.dll 写 PF 内联名字缓冲 + TDB SetDisplayName。
+本模块只负责:构造请求、转交、
 轮询结果、清理;写入本身的安全校验在辅助 DLL 里(按 FLT/TDB/U 三个
 SHA-256 自查,不符即拒绝)。
 
@@ -201,62 +202,62 @@ def run_native(p, operations: list, *, action: str = "labels", timeout: int = 30
     """
     if action not in ("labels", "codec", "catalog", "selection"):
         raise ValueError("未知的参数请求动作:" + action)
+    expected = target(p)
+    identity_helper = native_root() / "ae_host_identity.dll"
+    if not identity_helper.is_file():
+        raise RuntimeError("宿主身份模块缺失，请检查便携包是否已完整解压")
+    helper = native_root() / "ae_parameters.dll" if action in ("labels", "codec") else None
+    if helper is not None and not helper.is_file():
+        raise RuntimeError("参数辅助模块缺失:请运行 tools/build_native.py 构建")
+
     root = Path(data_root) / "ae-bridge" if data_root else bridge_root()
     root.mkdir(parents=True, exist_ok=True)
     folder = root / uuid.uuid4().hex
     folder.mkdir(parents=True)
     output = folder / "result.json"
     permit = folder / "permit"
-    permit.write_text("pending", encoding="ascii")
-
-    expected = target(p)
-    identity_helper = native_root() / "ae_host_identity.dll"
-    helper = native_root() / "ae_parameters.dll"
-    if action != "codec" and not helper.is_file():
-        raise RuntimeError("参数辅助模块缺失:请运行 tools/build_native.py 构建")
-    if not identity_helper.is_file():
-        raise RuntimeError("宿主身份模块缺失:请运行 tools/build_native.py 构建")
-
-    request = {
-        "targetHost": expected,
-        "identityHelper": identity_helper.as_posix(),
-        "action": action,
-        "requestId": folder.name,
-        "hostVersion": host_version_of(profile) if profile else None,
-        "projectToken": project_token,
-        "operations": operations,
-        "output": output.as_posix(),
-        "permit": permit.as_posix(),
-        "expires": int((time.time() + timeout - 2) * 1000),
-        "helper": helper.as_posix() if action != "codec" else "",
-    }
-    if read_scope:
-        request["readScope"] = read_scope
-    if profile is not None:
-        request["adapter"] = {
-            "flt": profile.flt_sha,
-            "tdb": profile.tdb_sha,
-            "codec": profile.codec_sha,
-            "layout": native_layout(profile),
-            "encoding": profile.encoding,
-        }
-
-    script = relay_script(folder)
-    template = (jsx_root() / "parameter_bridge.jsx").read_text(encoding="utf8")
-    # AE 的命令行脚本加载器可能按系统旧编码解读非 ASCII 源码:
-    # 请求整体 JSON 化后再逐字符 \uXXXX 转义,脚本文件纯 ASCII。
-    source = template.replace("@@REQUEST@@", json.dumps(request, ensure_ascii=True))
-    source = "".join(c if ord(c) < 128 else "\\u%04x" % ord(c) for c in source)
-    script.write_text(source, encoding="ascii")
-
-    launcher = subprocess.Popen(
-        [p.image, "-r", str(script)],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-    )
-    until = time.monotonic() + timeout
-    submitted = time.time()
+    script = None
+    launcher = None
     try:
+        permit.write_text("pending", encoding="ascii")
+        request = {
+            "targetHost": expected,
+            "identityHelper": identity_helper.as_posix(),
+            "action": action,
+            "requestId": folder.name,
+            "hostVersion": host_version_of(profile) if profile else None,
+            "projectToken": project_token,
+            "operations": operations,
+            "output": output.as_posix(),
+            "permit": permit.as_posix(),
+            "expires": int((time.time() + timeout - 2) * 1000),
+        }
+        if read_scope:
+            request["readScope"] = read_scope
+        if helper is not None:
+            request["helper"] = helper.as_posix()
+            if profile is not None:
+                request["adapter"] = {
+                    "flt": profile.flt_sha,
+                    "tdb": profile.tdb_sha,
+                    "codec": profile.codec_sha,
+                    "layout": native_layout(profile),
+                    "encoding": profile.encoding,
+                }
+
+        script = relay_script(folder)
+        template = (jsx_root() / "parameter_bridge.jsx").read_text(encoding="utf8")
+        # AE 的命令行脚本加载器可能按系统旧编码解读非 ASCII 源码。
+        source = template.replace("@@REQUEST@@", json.dumps(request, ensure_ascii=True))
+        source = "".join(c if ord(c) < 128 else "\\u%04x" % ord(c) for c in source)
+        script.write_text(source, encoding="ascii")
+
+        launcher = subprocess.Popen(
+            [p.image, "-r", str(script)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        until = time.monotonic() + timeout
         while time.monotonic() < until:
             if output.exists():
                 try:
@@ -281,15 +282,15 @@ def run_native(p, operations: list, *, action: str = "labels", timeout: int = 30
         raise TimeoutError("AE 参数操作超时,已撤销执行许可。" + cause)
     finally:
         safe_unlink(permit)
-        if launcher.poll() is None and launcher.pid != p.pid:
+        if launcher is not None and launcher.pid != p.pid and launcher.poll() is None:
             try:
                 launcher.terminate()
                 launcher.wait(timeout=5)
             except (OSError, subprocess.TimeoutExpired):
                 pass
-        if script.name != "request.jsx":
+        if script is not None:
             safe_unlink(script)
-        for owned in (folder / STARTED, folder / "request.jsx", output):
+        for owned in (folder / STARTED, output):
             safe_unlink(owned)
         try:
             folder.rmdir()
@@ -310,7 +311,7 @@ def _elevation_hint(pid: int) -> str:
     return elevation_mismatch(pid) or MISMATCH_TEXT
 
 
-def probe_catalog(p, timeout: float = 120.0) -> list:
+def probe_catalog(p, timeout: float = 120.0, *, expected_version: str = "") -> list:
     """跑 catalog_probe.jsx:让 AE 自报 app.effects 全目录(displayName/
     matchName/category),供「自动识别与适配」的 registry_layout 交叉校验
     当对照面。只读、不碰工程。返回 catalog 行列表;超时/为空抛 RuntimeError。
@@ -325,6 +326,7 @@ def probe_catalog(p, timeout: float = 120.0) -> list:
     folder.mkdir(parents=True)
     output = folder / "probe.json"
     script = None
+    launcher = None
     try:
         src = (jsx_root() / "catalog_probe.jsx").read_text(encoding="utf8")
         # ★ 占位是 var outputPath = @@OUTPUT@@; —— 替换值必须带引号,
@@ -333,7 +335,7 @@ def probe_catalog(p, timeout: float = 120.0) -> list:
         src = "".join(c if ord(c) < 128 else "\\u%04x" % ord(c) for c in src)
         script = relay_script(folder)
         Path(script).write_text(src, encoding="ascii")
-        subprocess.Popen(
+        launcher = subprocess.Popen(
             [p.image, "-r", str(script)],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -348,6 +350,8 @@ def probe_catalog(p, timeout: float = 120.0) -> list:
                     continue
                 if report.get("error"):
                     raise RuntimeError("目录探针在 AE 内报错:" + str(report["error"])[:120])
+                if expected_version and report.get("aeVersion") != expected_version:
+                    raise RuntimeError("目录探针返回的 AE 构建与当前编辑会话不一致")
                 catalog = report.get("catalog") or []
                 if not catalog:
                     raise RuntimeError("目录探针返回空目录(app.effects 为空?)")
@@ -363,6 +367,18 @@ def probe_catalog(p, timeout: float = 120.0) -> list:
             folder.rmdir()
         except OSError:
             pass
+        if launcher is not None and launcher.pid != p.pid:
+            try:
+                # A relay can keep an AE window briefly after writing its reply.
+                # Rechecking the editor while that window exists sees two hosts.
+                launcher.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                try:
+                    launcher.terminate()
+                except OSError:
+                    if launcher.poll() is None:
+                        raise
+                launcher.wait(timeout=5)
 
 
 def split_packed(operations: list, module_of) -> tuple:

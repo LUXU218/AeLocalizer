@@ -11,7 +11,7 @@ class BackgroundSessionPolicyTests(unittest.TestCase):
         self.root = self.enterContext(tempfile.TemporaryDirectory())
         self.controller = Mock(spec_set=BackgroundController)
         self.controller.background_state.return_value = BackgroundState(
-            shutting_down=False, engine_busy=False, language_disabled=False, language_configured=True,
+            shutting_down=False, language_disabled=False, language_configured=True,
         )
         self.controller.background_operations_busy.return_value = False
         self.controller.background_needs_effects_controller.return_value = False
@@ -25,8 +25,8 @@ class BackgroundSessionPolicyTests(unittest.TestCase):
 
     def test_language_handoff_preserves_settings_and_shuts_down_only_once(self):
         self.assertTrue(settings.put(self.root, "other_preference", "kept"))
-        self.assertTrue(self.session.request_close())
-        self.assertTrue(self.session.request_close())
+        self.assertTrue(self.session.prepare_language_handoff())
+        self.assertTrue(self.session.prepare_language_handoff())
         self.assertEqual(settings.load(self.root), {"other_preference": "kept",
                                                     "background_language_session": self.running,
                                                     "background_on_ae_startup": True})
@@ -34,10 +34,10 @@ class BackgroundSessionPolicyTests(unittest.TestCase):
 
     def test_failed_handoff_can_retry_without_shutting_down_controller(self):
         with patch.object(settings, "save", return_value=False):
-            self.assertFalse(self.session.request_close())
+            self.assertFalse(self.session.prepare_language_handoff())
         self.controller.shutdown.assert_not_called()
         self.controller.notify_background.assert_called_once_with("warn", "无法保存后台会话，设置窗口已保留。")
-        self.assertTrue(self.session.request_close())
+        self.assertTrue(self.session.prepare_language_handoff())
         self.controller.shutdown.assert_called_once_with()
 
     def test_automatic_language_close_waits_until_idle_and_saves_handoff(self):
@@ -68,8 +68,9 @@ class BackgroundSessionPolicyTests(unittest.TestCase):
         self.assertTrue(self.session.workspace_busy())
         self.controller.background_operations_busy.assert_called_once_with(include_panel=True)
 
-    def test_ordinary_close_does_not_set_background_preference_after_engine_stop(self):
-        self.controller.background_engine_enabled.return_value = False
-        self.assertTrue(self.session.request_close())
-        self.controller.shutdown.assert_called_once_with()
+    def test_manual_close_requests_full_stop_even_when_effects_can_stay(self):
+        self.controller.background_needs_effects_controller.return_value = True
+        self.assertFalse(self.session.request_close())
+        self.controller.stop_for_exit.assert_called_once_with()
+        self.controller.shutdown.assert_not_called()
         self.assertEqual(settings.load(self.root), {})

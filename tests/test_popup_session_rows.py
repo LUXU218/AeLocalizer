@@ -390,6 +390,16 @@ class LanguageProgressSplitTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("discovery-pending", reason)
 
+    def test_observed_native_menu_can_confirm_on_while_discovery_continues(self):
+        eng = self._engine(_ProgressPopup(0, 0, discovery_pending=True))
+        eng.draw.stats = lambda: {"layer_menu_replaced": 3}
+        with mock.patch("runtime.managed_guard._redraw_host", return_value=True):
+            self.assertEqual(eng.apply("on", {"pid": 1}, 7), (True, ""))
+            self.assertTrue(eng.background_discovery_pending)
+            off, reason = eng.apply("off", {"pid": 1}, 8)
+        self.assertFalse(off)
+        self.assertIn("discovery-pending", reason)
+
     def test_row_truncation_is_not_ready(self):
         eng = self._engine(_ProgressPopup(2, 1, rows_pending=True))
         with mock.patch("runtime.managed_guard._redraw_host",

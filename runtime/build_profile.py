@@ -1280,10 +1280,47 @@ def popup_label_profile(path):
         raise BuildMismatch("popup label conversion unavailable or ambiguous")
     call = calls[0]
     after = call.address + call.size
-    return {"scope_rva": scope, "scope_bytes": image.read_rva(scope, 12).hex(),
-            "path_arg": path_arg, "helpers": _popup_path_helpers(path),
-            "call_rva": call.address, "call_bytes": call.bytes.hex(),
-            "ret_rva": after, "ret_bytes": image.read_rva(after, 8).hex()}
+    profile = {"scope_rva": scope, "scope_bytes": image.read_rva(scope, 12).hex(),
+               "path_arg": path_arg, "helpers": _popup_path_helpers(path),
+               "call_rva": call.address, "call_bytes": call.bytes.hex(),
+               "ret_rva": after, "ret_bytes": image.read_rva(after, 8).hex()}
+    try:
+        profile["stream_scopes"] = _popup_stream_scopes(image, exports, leaf, path)
+    except BuildMismatch:
+        pass  # The independently verified path-based scope still applies.
+    return profile
+
+
+def _popup_stream_scopes(image, exports, leaf, path):
+    """Identify typed UI menu builders that pass a live effect stream."""
+    tdb = PEImage(os.path.join(os.path.dirname(os.path.abspath(path)), "TDB.dll"))
+    accessors = {}
+    for key, symbol, code in (
+            ("match", b"?GetMatchName@TDB_StreamBase@@QEBAAEBVTDB_MatchName@@XZ", "488d4108c3"),
+            ("parent", b"?GetParent@TDB_StreamBase@@QEBAPEBVTDB_StreamGroup@@XZ", "488b4120c3")):
+        name, rva = _popup_export(tdb.exports(), symbol)
+        if tdb.read_rva(rva, 5).hex() != code:
+            raise BuildMismatch("popup stream owner layout changed")
+        accessors[key] = {"name": name.decode("ascii"), "bytes": code}
+    builders = []
+    for symbol, argument, moved in (
+            (b"?BuildParamPopup@CLayer@@QEBAGAEBVTDB_Stream@@_NPEAVOS_Menu@utility@dvaui@@1@Z",
+             1, "rcx, rdx"),
+            (b"?MakePopupData@CLayer@@QEBA?AVUI_MenuSpec@@AEBVTDB_Stream@@_N1@Z",
+             2, "rcx, r8")):
+        try:
+            _, rva = _popup_export(exports, symbol)
+            body = _popup_function(image, rva)
+            index = _popup_call_index(body, leaf)
+            if not any(op.mnemonic == "mov" and op.op_str == moved for op in body[:index]):
+                continue
+            site = body[index]
+            builders.append({"rva": rva, "bytes": image.read_rva(rva, 16).hex(),
+                             "argument": argument, "call_rva": site.address,
+                             "call_bytes": site.bytes.hex()})
+        except BuildMismatch:
+            continue
+    return {"accessors": accessors, "builders": builders} if builders else None
 
 
 def media_popup_field_layout(tdb_path, tdb_sha, media_path, media_sha):
@@ -1342,15 +1379,40 @@ def media_popup_field_layout(tdb_path, tdb_sha, media_path, media_sha):
     if calls != [getter, setter]:
         raise BuildMismatch("MediaFoundation popup copy calls changed")
 
+    read_code = code[getter - base:getter - base + 170]
     read_offset = _popup_compare_offset(
-        code[getter - base:getter - base + 170], rb"\x41\x8b\x40\x0c",
+        read_code, rb"\x41\x8b\x40\x0c",
         rb"\x49\x8d\x14\x00\x48\x85\xd2\x0f\x84....\x4c\x8b\x02")
+    if read_offset is None:
+        # The newer compiler reuses the string capacity constant (15)
+        # for the final type check and adds the member address in RCX.
+        reads = list(re.finditer(
+            rb"\xbf\x0f\x00\x00\x00\x48\x89\x7a\x18\x40\x88\x32"
+            rb"\xc7\x44\x24\x20\x01\x00\x00\x00\x41\x8b\x40\x0c"
+            rb"\x83\xf8\x04\x74\x0d\x83\xf8\x07\x74\x08\x3b\xc7"
+            rb"\x0f\x85(?P<reject>....)\x49\x8b\xc8\xb8(?P<member>....)"
+            rb"\x48\x03\xc8\x0f\x84(?P<address>....)\x48\x8b\x09"
+            rb"\x48\x85\xc9\x0f\x84(?P<value>....)", read_code, re.S))
+        if len(reads) == 1:
+            match = reads[0]
+            exits = {match.end(name) + struct.unpack("<i", match[name])[0]
+                     for name in ("reject", "address", "value")}
+            if len(exits) == 1 and match.end() <= next(iter(exits)) < 512:
+                read_offset = struct.unpack("<I", match["member"])[0]
     write_code = code[setter - base:setter - base + 700]
-    writes = list(re.finditer(
-        rb"\x8b\x42\x0c\x83\xf8\x04\x74\x0a\x83\xf8\x07\x74\x05"
-        rb"\x83\xf8\x0f\x75\x04\x4c\x8d\x6a(.)\x4d\x85\xed\x0f\x84....", write_code, re.S))
-    if (read_offset is None or len(writes) != 1 or read_offset != writes[0][1][0]
-            or not re.search(rb"\x49\x89\x45\x00", write_code[writes[0].end():])
+    write_offsets = []
+    for pattern, store in (
+        (rb"\x8b\x42\x0c\x83\xf8\x04\x74\x0a\x83\xf8\x07\x74\x05"
+         rb"\x83\xf8\x0f\x75\x04\x4c\x8d\x6a(.)\x4d\x85\xed\x0f\x84....",
+         b"\x49\x89\x45\x00"),
+        (rb"\x8b\x42\x0c\x83\xf8\x04\x74\x0d\x83\xf8\x07\x74\x08"
+         rb"\x45\x33\xf6\x83\xf8\x0f\x75\x04\x4c\x8d\x72(.)\x4d\x85\xf6\x0f\x84....",
+         b"\x49\x89\x06"),
+    ):
+        for match in re.finditer(pattern, write_code, re.S):
+            if store in write_code[match.end():]:
+                write_offsets.append(match[1][0])
+    if (read_offset is None or write_offsets != [read_offset]
             or found[1][0] + read_offset != POPUP_FIELD_OFFSET):
         raise BuildMismatch("MediaFoundation popup option pointer layout changed")
     return POPUP_FIELD_OFFSET

@@ -5,6 +5,7 @@ from unittest import mock
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from runtime import param_draw_hook as ph
 from runtime import build_profile as bp
+from tests.ae_module_fixtures import is_ae_26_3_0_87
 
 class PopupPaintSelectionTests(unittest.TestCase):
     def test_six_hosts_share_automatic_popup_activity_and_menu_label_discovery(self):
@@ -24,7 +25,12 @@ class PopupPaintSelectionTests(unittest.TestCase):
         session=mock.Mock();session.create_script.return_value=script
         agent=SimpleNamespace(attach=mock.Mock(return_value=session))
         lib=Path(r'C:\Program Files\Adobe')/('Adobe After Effects '+str(year))/'Support Files/AfterFXLib.dll'
-        return ph.ParamDrawHook(123,{'Amount':'数量'},str(lib)),agent
+        adopted = None
+        if year == 2026:
+            sha = bp.sha256_file(lib)
+            if is_ae_26_3_0_87(lib, sha):
+                adopted = SimpleNamespace(enabled=True, version='26.3.0.87', parameter_draw_sha=sha)
+        return ph.ParamDrawHook(123, {'Amount': '数量'}, str(lib), adopted=adopted), agent
 
     def test_classic_host_has_first_draw_without_v2_menu(self):
         hook,agent=self.setup_hook(2022)
@@ -74,14 +80,20 @@ class PopupPaintSelectionTests(unittest.TestCase):
             for year, stride in ((2025, 0x98), (2026, 0x110)):
                 with self.subTest(year=year):
                     dll = root / ('Adobe After Effects ' + str(year)) / 'Support Files/dvaui.dll'
-                    self.assertEqual(bp.popup_menu_profile(dll)['descriptor_stride'], stride)
+                    expected = 0xB8 if year == 2026 and is_ae_26_3_0_87(dll) else stride
+                    self.assertEqual(bp.popup_menu_profile(dll)['descriptor_stride'], expected)
 
     def test_2026_keeps_the_cache_fix(self):
         hook,agent=self.setup_hook(2026)
         with mock.patch.dict(sys.modules,{'frida':agent}), \
              mock.patch.object(ph,'popup_draw_profile',wraps=ph.popup_draw_profile) as get:
             self.assertTrue(hook.attach());self.assertEqual(get.call_count,1)
-        self.assertEqual(hook.popup_paint_profile['known_version'],'26.5.0.89')
+        self.assertEqual(hook.popup_paint_profile['text_offset'], 0x180)
+        if hook.adopted:
+            self.assertEqual(hook.profile['local_version'], '26.3.0.87')
+            self.assertEqual(hook.popup_paint_profile['known_version'], '')
+        else:
+            self.assertEqual(hook.popup_paint_profile['known_version'], '26.5.0.89')
 
     def test_unverified_menu_does_not_block_parameter_hook(self):
         hook, agent = self.setup_hook(2026)

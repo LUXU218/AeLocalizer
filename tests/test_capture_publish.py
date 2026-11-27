@@ -1,9 +1,8 @@
 # -*- coding: utf-8 -*-
 """补词采集落盘（受控 runtime → all_param_names/renamed/rename_miss/enum）。
 
-背景（2026-11-15 实测）：补词页读的 `<hook>/out/all_param_names.json` 只有旧外部
-guard 会写；受控 runtime 用绘制期替换，从不给参数改名，所以那四个文件一直
-没有生产者 —— 用户在 AE 开着的时候点「提取」永远看到「没采集到参数」。
+受控运行时在绘制期替换显示名。若缺少采集快照，补词页无法读到本次会话见过的参数。
+验证启动清理和观察结果写入，避免读取过期快照。
 
 这里只锁「落盘契约」，不启动 AE、不注入 frida：
   · _write_capture 写出的四个文件内容/格式正确；
@@ -78,15 +77,24 @@ class WriteCaptureTest(unittest.TestCase):
         self.assertFalse(self.m._write_capture(self.tmp, {"seen": 5}))
 
     def test_start_clears_previous_session_files(self):
-        # 守护启动时清残留：AE 关掉后补词页不能继续展示上一次会话的采集。
-        with open(self.m.__file__, encoding="utf-8") as f:
-            src = f.read()
-        self.assertIn("all_param_names.json", src)
-        block = src.split("上一个守护会话的采集文件必须清掉", 1)
-        self.assertEqual(len(block), 2)
-        for name in ("all_param_names.json", "renamed_names.json",
-                     "rename_miss.json", "enum_missing.json"):
-            self.assertIn(name, block[1][:800], name)
+        runtime = _load()
+        output = Path(self.tmp)
+        runtime.OUT = output
+        runtime.CTL = output / "control"
+        runtime.TMP = output / "tmp"
+        # 模拟启动阶段无法获取互斥锁，验证清理后退出，全程无需连接 AE。
+        runtime._mutex = lambda _: None
+        captures = ("all_param_names.json", "renamed_names.json",
+                    "rename_miss.json", "enum_missing.json", "label_diagnostics.json")
+        for name in captures:
+            (output / name).write_text("stale", encoding="utf-8")
+        unrelated = output / "unrelated.txt"
+        unrelated.write_text("keep", encoding="utf-8")
+
+        self.assertEqual(runtime.main([]), 4)
+        for name in captures:
+            self.assertFalse((output / name).exists(), name)
+        self.assertEqual(unrelated.read_text(encoding="utf-8"), "keep")
 
 
 class LoopPublishTest(unittest.TestCase):

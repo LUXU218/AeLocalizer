@@ -50,13 +50,8 @@ from app.backend_parts.wallpaper_ui import WallpaperUiMixin
 def _resolve_data_root() -> str:
     """用户数据目录（settings / 词典库 / 密钥 都在这）。
 
-    ★★ 2026-10-23 事故后加固：
-      用户报「退出重进，密钥就被自动替换」，根因是测试脚本直接
-      `AppBackend()` + `setAiKey("sk-test...")`，把【真实】用户目录里的
-      DPAPI 密文覆盖了。
-      现在允许用环境变量 `AELOC_DATA_ROOT` 指到沙盒目录 ——
-      测试/截图/诊断脚本必须用它（或像 tests/test_backend.py 那样
-      改本模块的 DATA_ROOT），绝不允许再落到真实 %LOCALAPPDATA% 上。
+    2026-10-23：测试直接使用默认数据目录时覆盖了已保存的 DPAPI 密文。
+    测试、截图和诊断使用 AELOC_DATA_ROOT 指向独立目录，或隔离本模块的 DATA_ROOT。
     """
     env = os.environ.get("AELOC_DATA_ROOT", "").strip()
     if env:
@@ -88,15 +83,13 @@ _DEFAULT_DATA_ROOT = DATA_ROOT
 _CJK_RE = re.compile(r"[\u4e00-\u9fff]")
 
 
-#: BCC/Sapphire 注册期塞进枚举采集的内部轴/曲线标签 —— 不是用户可见文案,
-#: 是补词列表的噪音(2026-11-01 用户反馈「界面没这么多没翻译的,挑这么多出来」)
+#: BCC/Sapphire 注册期会向枚举流加入内部轴和曲线标签。补词列表过滤这些内部值。
 _ENUM_JUNK_RES = (
     re.compile(r"^L\d{1,4}\b"),
     re.compile(r"^[XYZ0-9]{1,4}\s+Axis$", re.IGNORECASE),
     re.compile(r"^[XYZ]{1,3}\s*Axis$", re.IGNORECASE),
-    # ★ 2026-11-02: 单位/范围/序号串不是可译的枚举项 —— 插件把
-    #   「0 - 100 % RGB」「32nd」「64th」这类值塞进枚举流，补词页却当成
-    #   待译词（用户实测 15 行里混着这些）。纯数字/序号/数值范围一律过滤。
+    # 枚举流可能混入 0 - 100 % RGB、32nd、64th 等单位、范围和序号。
+    # 补词列表过滤纯数字、序号和数值范围。
     re.compile(r"^\d{1,3}(?:st|nd|rd|th)$", re.IGNORECASE),
     re.compile(r"^\d{1,3}(?:\.\d+)?\s*-\s*\d{1,3}(?:\.\d+)?(?:\s*%)?\s*[A-Za-z]{0,8}$"),
     re.compile(r"^-?\d+(?:\.\d+)?(?:\s*%|\s*[A-Za-z]{1,6})?$"),
@@ -110,12 +103,9 @@ def _is_junk_enum(s: str) -> bool:
     return any(rx.search(s) for rx in _ENUM_JUNK_RES)
 
 
-# ★ 2026-11-02 补词误报修复：BCC/Sapphire/Trapcode 等插件的「效果名」也会
-#   出现在参数流的返回结构里（守护 onLeave 读 +0x40 时无法区分参数名与
-#   流里的其它字符串），被当成参数名采集 → 补词页列出 BCC Z-Blur 这类行，
-#   用户看到「左侧插件参数已是全中文，补词却冒出效果名」。
-#   效果名统一带插件品牌前缀，参数名从不带 → 按前缀隔离到 junk（排尾，
-#   仍可手动翻译，不硬丢弃，避免误杀真参数）。
+# BCC、Sapphire、Trapcode 的效果名会出现在参数流的返回结构里。
+# 守护在 onLeave 读取 +0x40 时可能把 BCC Z-Blur 等效果误采为参数名。
+# 按品牌前缀将这些词排到列表末尾，保留手动翻译入口。
 _EFFECT_NAME_PREFIXES = (
     "BCC ", "BCC+", "Sapphire ", "S_", "Trapcode ", "Red Giant ",
     "Element 3D", "Optical Flares", "Plexus", "Particular", "Starglow",
@@ -128,12 +118,8 @@ def _looks_like_effect_name(s: str) -> bool:
     return s.startswith(_EFFECT_NAME_PREFIXES)
 
 
-# ★ 2026-11-02 补词「提取不到参数」的真正原因：引擎词典里有一批 **zh == en**
-#   的「同形占位」条目（extra_overrides 层，如 PreBlur→PreBlur、PostBlur→
-#   PostBlur）。守护把同形文字写回时也算改名成功（renamedOk），于是
-#   renamed_names.json 声称已译、AE 面板仍是英文，补词又因「在改名名单里」
-#   直接跳过 —— 用户看到的就是「明明还有英文，补词却提不出来」。
-#   这里把这类条目重新算成缺词；但纯缩写/格式/品牌本来就不该翻，保留原文。
+# 守护原样写回 PreBlur 等同形占位时也会记为改名成功。
+# 补词将这些仍显示英文的项目重新列为缺词。缩写、格式和品牌照常保留原文。
 _SAME_FORM_KEEP_RE = re.compile(r"^[A-Z0-9][A-Z0-9 +./%|_-]{0,9}$")
 _KEEP_SAME = frozenset({
     "mocha", "Mocha", "Mocha AE", "Twixtor", "RSMB", "RSMB Pro",
@@ -271,6 +257,15 @@ def _attrib_cache(ae_version: str) -> str:
     return attrib.cache_path(DATA_ROOT, ae_version)
 
 
+def _adaptation_warning(version, result):
+    issues = []
+    if reason := result.get("parameter_draw_error"):
+        issues.append(f"参数名绘制校验未通过：{reason}")
+    if reason := result.get("popup_error") or result.get("popup_blocked"):
+        issues.append(f"AE 下拉通道未通过校验，展开选项保留原文：{reason}")
+    return f"AE {version} " + "；".join(issues) if issues else ""
+
+
 class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
     """QML 的唯一入口对象。"""
 
@@ -286,6 +281,7 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
     versionsChanged = Signal()
     stateChanged = Signal()
     engineSessionChanged = Signal()
+    exitReady = Signal()
     #: 效果名编辑器的勾选变化（批量操作按钮的可用状态）
     nameSelectionChanged = Signal()
     #: 词典内容变了（编辑/新增/导入/接受草稿）→ 词典面板重新载入
@@ -293,12 +289,8 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        # ★★ 2026-10-22 用户报的 bug：
-        #   「切到 2025 应用汉化，退出软件再重进，它又自动切回 2026」
-        #   原因就是这两行永远取 _installs[0]（列表里排最前的 = 最高版本），
-        #   用户选过的版本根本没存下来。
-        #   现在：启动时读 settings.json 里上次用的版本；只有它已卸载
-        #   或从没存过，才回退到列表第一个。
+        # 始终取第一个安装项会在重启时将已选的 AE 2025 切回 2026。
+        # 启动时读取上次所选版本。首次运行或该版本已卸载时才回退到首项。
         self._installs = find_ae_installs()
         self._version, self._root = _pick_saved_version(self._installs)
         self._panelLocalization = PanelController(self, os.path.join(DATA_ROOT, "panels"))
@@ -330,11 +322,10 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
         #   ★ 必须用【顶层 import】，写在函数里 PyInstaller 静态分析抓不到，
         #     打包后 exe 会 ModuleNotFoundError。
         self._groupModel = GroupListModel(self)
-        # ★ 效果名编辑器模型（2026-10-22 用户要求）
-        #   能直接改所有插件的效果名，AI 翻译之后也能改，也能自己改。
+        # 效果名编辑器支持直接修改效果名和修订 AI 译名。
         self._nameModel = NameListModel(self)
         self._nameRows: list = []
-        # ★ 词典浏览/编辑模型（2026-10-25 用户要求：词典页可编辑并合并进效果名页）
+        # 效果名页共用的词典浏览与编辑模型。
         self._dictModel = DictListModel(self)
         self._dictVersion = 0
         self._effectsPath = ""
@@ -343,6 +334,7 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
         # ---- 运行时引擎状态 ----
         self._engine = engine.EngineStatus()
         self._engineSession = EngineSessionState()
+        self._windowResizing = False
         self.stateChanged.connect(self.engineSessionChanged)
         self._attrib: Dict[str, List[str]] = {}
         self._attribLoaded = False
@@ -355,10 +347,8 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
         self._hostAeCacheAt = 0.0
 
         # ---- AI 翻译状态 ----
-        # ★★ 2026-10-23：服务商 / Base URL / 模型 必须跟着 Key 一起记住。
-        #   否则「退出重进」后服务商回到默认 DeepSeek，而 Key 是别家的
-        #   （或自定义端点）—— 请求打到错误的服务上直接 401，
-        #   用户看到的现象同样是「我原来有效的 Key 没用了」。
+        # 和密钥一同保存服务商、Base URL 与模型。
+        # 重启后错用默认服务商会将请求发到错误端点并收到 401。
         self._aiProvider = "deepseek"
         self._aiBaseUrl = ""
         self._aiModel = ""
@@ -441,8 +431,7 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
         except Exception:
             pass
 
-        # ★ 自动适配(2026-10-28,用户要求):起event loop 后静默试一次 ——
-        #   AE 在跑且构建未适配就自动适配;已适配/AE 没开则什么都不发生
+        # 事件循环启动后，检查正在运行且尚未适配的 AE 构建。
         # ★ 2026-10-30 加固:沙盒模式(AELOC_DATA_ROOT 指向测试目录)一律不做 ——
         #   tests/test_backend.py 会构造 AppBackend 并跑事件循环,旧代码会趁机
         #   对【用户真在用的 AE】发起 frida 探测/适配,污染用户的 adapter_profiles。
@@ -631,9 +620,7 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
     def filterNames(self, keyword: str, onlyZh: bool, vendor: str):
         """过滤编辑器列表（关键词 + 只看已译 + 按插件厂商）。
 
-        ★ 2026-10-23 用户需求：「按插件名称，批量选择」
-          vendor 传空串 = 全部插件；配合「全选当前筛选」即可
-          一次勾上某个插件的全部效果名。
+        vendor 为空时展示全部厂商。按厂商筛选后，可一次勾选当前列表的效果名。
         """
         self._nameModel.setFilter(keyword or "", onlyZh, vendor or "")
         return self._nameModel.rowCount()
@@ -858,12 +845,10 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
         r"GenArts |Boris FX |Rowbyte |Red Giant )")
 
     def _effect_name_keys(self) -> set:
-        """当前插件清单里的效果名集合（词典页要把它们排除掉）。
+        """收集插件清单中的效果名，供词典页排除。
 
-        ★ 2026-11-15 用户反馈：「效果名不应该出现在词典页面」。
-          效果名和参数名共用同一个 DictStore（saveName 也写 user_locked 层），
-          所以 resolve() 里天然混着 1000+ 条效果名。它们已经在「效果名」子页
-          有专门的编辑器，词典页再列一遍既重复又掩盖了真正要补的参数名。
+        效果名和参数名共用 DictStore，resolve() 会同时返回两类条目。
+        效果名由专用编辑器管理，词典页聚焦参数和下拉项。
         """
         try:
             return {(r.en or "").strip() for r in self._nameRows if r.en}
@@ -962,7 +947,7 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
             return "请填写中文译名"
         return self.saveDictEntry(en, zh)
 
-    # ---------------- 效果名：批量复制（2026-10-25 用户要求） ----------------
+    # ---------------- 效果名批量复制 ----------------
 
     @Slot(result=str)
     def copySelectedNames(self):
@@ -997,8 +982,7 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
     def copySelectedTranslations(self):
         """把勾选行的中文译文复制到剪贴板（一行一个，顺序 = 列表显示顺序）。
 
-        ★ 2026-10-27 用户要求：中文译名列也要能像英文名一样跨行框选，
-          Ctrl+C 出来就是一行一个译名的纯文本。
+        中文译名列支持跨行框选，Ctrl+C 按显示顺序输出纯文本。
         """
         ens = self._nameModel.selectedEnOrdered()
         if not ens:
@@ -1025,7 +1009,11 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
     @Slot(bool)
     def setWindowResizing(self, active):
         """Defer UI-thread process polling while handling resize input."""
+        if self._windowResizing == active:
+            return
         self._windowResizing = active
+        if not active:
+            self.refreshEngineSessionDisplay()
 
     @Slot(result="QVariantList")
     def cursorPos(self):
@@ -1106,7 +1094,7 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
 
     @Slot(str, str, result=str)
     def writeNamesFromPopup(self, en_text: str, zh_text: str):
-        """两栏批量写入（2026-10-26 用户要求把弹层分成英文/汉化两块）。
+        """按英文名与中文译名两栏批量写入。
 
         左栏 = 勾选的英文名（定位锚），右栏每行对应左栏一行；
         右栏行若自带英文名（TAB / 「en = zh」/ 「en：zh」，或 Tab 丢失后
@@ -1576,9 +1564,8 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
     def _saveSelectionNow(self) -> None:
         """把当前勾选 + 通道状态立刻落盘。
 
-        ★ 2026-10-23：原来只在「应用」时保存，于是用户把「效果名」通道
-          打开后没点应用就退出，重进又变回关闭 —— 表现就是
-          「明明开了效果名，一键应用还是只汉化参数」。
+        只在应用时保存会在直接退出时丢失通道状态。
+        开关和勾选变更后立即保存，重启时可恢复选择。
         """
         try:
             if self._inv:
@@ -2965,7 +2952,13 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
 
     @Slot()
     def stopEngine(self):
-        """优雅停止引擎（写 STOP_NOW.flag，等它自己卸载 hook）。"""
+        self._stop_engine()
+
+    def stop_for_exit(self):
+        self._stop_engine(exit_when_stopped=True)
+
+    def _stop_engine(self, *, exit_when_stopped=False):
+        """Request native restoration and wait for the guard to exit."""
         self._engine_intent_set(False)
         self._reopenedBackground = None
         engine.request_foreground_window()
@@ -2974,7 +2967,7 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
             self.toast.emit("warn", "引擎正在处理中，请稍候")
             self.engineSessionChanged.emit()
             return
-        if not engine.engine_running():
+        if not exit_when_stopped and not engine.engine_running():
             self._engineSession.finish(stop_result=True)
             self._status = "引擎未运行"
             self.toast.emit("info", "引擎本来就没在运行")
@@ -2988,7 +2981,6 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
             ok, msg = payload
             self._engineSession.finish(stop_result=bool(ok))
             self._status = self._engineSession.stop_status
-            _quiet_stop = bool(getattr(self, "_engineStopQuiet", False))
             self._engineStopQuiet = False
             self.toast.emit("info" if ok else "warn", msg)
             # managed host 已退出：effect proxy 一并失效，下一次 effect ON
@@ -3002,6 +2994,12 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
                 self._liveHookSession = None
                 self._liveHookResumedGen = None
                 self._liveHookStopped = True
+            if ok and exit_when_stopped:
+                from core.windows_startup import cancel_standby
+
+                cancel_standby(DATA_ROOT)
+                self.exitReady.emit()
+                return
             # 引擎启停不再调用旧 _liveNamesAsync（不写 name slot、不重启 AE）。
             self.refreshEngine()
 
@@ -3011,7 +3009,9 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
             self._engineStopQuiet = False
             self.refreshEngine()
 
-        self._run(engine.stop_engine, done, _busy_text="正在停止引擎…", _on_fail=stop_fail)
+        self._run(engine.stop_engine, done,
+                  _busy_text="正在恢复原文并退出…" if exit_when_stopped else "正在停止引擎…",
+                  _on_fail=stop_fail)
 
     def _liveNamesAsync(self, mode: str, reason: str = "",
                         allow_restart: bool = True):
@@ -3248,8 +3248,8 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
     def _nudge_dump(self, gp, wait_s: float = 0.0) -> bool:
         """让守护「立刻」把采集落盘（DUMP_NOW.flag），不再等 60 秒周期。
 
-        ★ 2026-11-02 用户实测：刚把插件参数展开就点「提取」，清单里没有新
-        参数 —— 守护只在每 60 秒（且 hits 有变化）时才写 all_param_names.json。
+        只按 60 秒周期写 all_param_names.json 会让刚展开的参数缺席。
+        点击提取时请求立即写入当前采集结果。
         守护主循环 1 秒一拍，看到 <hook>/out/DUMP_NOW.flag 就强制 get_collected()
         落盘。这里丢标志；wait_s>0 时轮询文件 mtime 等它刷新（按钮点击可以等
         1~2 秒，自动刷新不等，避免每 4 秒卡 UI）。
@@ -3326,12 +3326,10 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
 
 【从引擎的实时采集里提取「见过但还没翻译」的参数名】
 
-        ★ 数据源（2026-10-25 用户要求"实时获取添加到图层上的插件参数名称"）：
-          guard_uni.py 注入 AE 后，把运行时见到的全部参数名每 60 秒落盘到
-          <hook>/out/all_param_names.json —— 用户在 AE 里把插件加到图层、
-          展开参数就会被采集。本槽只做筛选：
-            · 排除 AE 内部占位名（Generic Slider 之类，core/diag.py）
-            · 排除效果名（用户明确要求：仅限参数名，不含插件名）
+        守护采集 AE 图层实例已展开的参数，并周期性写入 <hook>/out/all_param_names.json。
+        本槽从快照中筛选条目：
+            · 排除 AE 内部占位名（例如 Generic Slider，见 core/diag.py）
+            · 排除效果和插件名称，聚焦参数名
             · 排除词典/引擎生效词典里已有译名的(引擎词库 ⊇ store,
               守护学习词与自带词库只有引擎侧知道)
           返回 {"seen": 采集总数, "items": [{"en": ...}, ...]}
@@ -3340,9 +3338,7 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
 
         from core.diag import is_placeholder
 
-        # ★ 2026-11-02 用户实测:AE 根本没开,点「提取」也能列出词 —— 采集文件
-        #   是上一次会话留下的快照(守护只在启动时清空),所以必须用「AE 现在
-        #   是否真的在跑」把关,否则补词页永远在展示历史数据。
+        # 守护只在启动时清空快照。提取前确认 AE 仍在运行，避免读取上次会话的数据。
         #   沙盒/测试进程不拦(与 _live_auto_allowed 同一套三道锁)。
         if self._live_auto_allowed():
             try:
@@ -3382,10 +3378,8 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
         if not isinstance(names, list):
             names = list(names or [])
         resolved = self._store.resolve()
-        # ★ 2026-11-02 缺词判定 = 引擎生效词典(store + 守护自有 dat/学习词的
-        #   合并结果),不是 store —— 守护词库比 store 多(实测 Deblur→去模糊
-        #   只在引擎侧),按 store 判会把引擎已汉化的词再列一遍(用户实测:
-        #   ECW 里已是「去模糊」,补词却还列 Deblur)。
+        # 缺词判定合并 store、守护词库和学习词。例如 Deblur → 去模糊 只有
+        # 守护词库有，仅使用 store 会重复列出已汉化参数。
         from core.export import collect_layers as _collect_layers
 
         # ★ 跟随本模块 DATA_ROOT(生产=真实根,测试沙盒随补丁走);
@@ -3397,10 +3391,8 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
             e = merged.get(k)
             return bool(e and e.get("zh"))
 
-        # ★ 2026-11-02「同形占位」：zh 与 en 完全一样 = 没有真正翻译。
-        #   这种条目不能再被当成「已覆盖」，否则守护写回同样文字 + renamed
-        #   名单会把真的英文参数永久藏起来（用户实测 BCC 单润 PreBlur/
-        #   PostBlur 一直英文、补词却只有 5 行）。
+        # 同形占位（zh == en）仍计为缺词。守护原样写回 PreBlur 和 PostBlur
+        # 也会记录成功，按成功名单过滤会漏掉这些英文参数。
         same_form: set = set()
         for _k, _v in merged.items():
             if not isinstance(_k, str) or not _v or not _v.get("zh"):
@@ -3427,13 +3419,10 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
                 with open(_rn_path, encoding="utf-8") as f:
                     _rn = _json.load(f)
                 if isinstance(_rn, list):
-                    # ★ 2026-11-02: 先归一化再比 —— Sapphire 的参数名带前导空格
-                    #   （" Phase RGB"），采集侧 s 已归一化，直接比会把这些词
-                    #   永久标成「未生效」（用户实测 15 行几乎全是这类误报）。
+                    # 采集侧已归一化。比较前也归一化成功名单，避免漏掉
+                    # 带前导空格的 Sapphire 参数名，例如 " Phase RGB"。
                     renamed_set = {_norm_name(x) for x in _rn if isinstance(x, str)}
-                # ★ 2026-11-02: 未生效要有「原因」——否则用户只看到红色标签，
-                #   不知道是译文比原名长(tooLong/entfail)还是对象已被回收
-                #   (flush-gone)。原因来自守护的 rename_miss.json。
+                # 从 rename_miss.json 读取未生效原因，区分 tooLong、entfail 和 flush-gone。
                 try:
                     _mm_path = os.path.join(os.path.dirname(gp), "out",
                                            "rename_miss.json")
@@ -3462,10 +3451,7 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
             s = " ".join(n.split())
             if not s or is_placeholder(s):
                 continue
-            # ★ 2026-11-02:引擎本次会话已改名成功的词，不论词典层查到与否
-            #   都不再算缺词 —— 补词卡的行集是快照，若不在这里挡掉，用户会
-            #   看到「参数」行而 AE 里其实早就是中文（用户反馈的误报来源之一）。
-            #   ★ 同形占位例外：zh==en 写上去了也还是英文，必须继续往下走。
+            # 补词快照排除当前会话已改名的参数。原样写回的同形占位继续检查。
             if s in renamed_set and s not in same_form:
                 continue
             if s in fx or _looks_like_effect_name(s):
@@ -3480,10 +3466,7 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
                 continue
             rec = resolved.get(s)
             if rec is not None and rec.zh:
-                # ★ 2026-11-02:store 层覆盖的词同样要做「改名未生效」判定 ——
-                #   词典有词(不管哪一层)≠ AE 里真改了名。用户实测:补词页
-                #   「没有缺词」的 toast 和 DeepClear 仍英文同时发生,就是
-                #   这里提前 continue 把盲区藏掉了。
+                # store 已有译名时也检查实际写入，例如 DeepClear 有译名却仍显示英文。
                 if s not in renamed_set:
                     stuck_items.append({"en": s, "kind": "param",
                                         "stuck": True, "why": miss_why.get(s, "")})
@@ -3573,8 +3556,7 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
         """补词卡一键 AI 补译(2026-10-29):当前缺词清单直接交给 AI,
         译名自动记入词典并热换生效 —— 不再需要手抄英文去外部 AI。
 
-        接口 = 「翻译」页用户配置的服务商(用户指定:第一页选什么就用什么,
-        DeepSeek/自定义/本地 Ollama 均可,无需在此页重复选择)。
+        复用「翻译」页选择的服务商，支持 DeepSeek、自定义端点和本地 Ollama。
         """
         if self._busy:
             self.toast.emit("warn", "有任务正在进行，请等它完成")
@@ -3848,12 +3830,8 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
         ★ 2026-10-21：AE 崩溃后重启会卡在崩溃修复对话框，
           看起来像"AE 没启动"，实际只要点「继续」就行。
           这个接口自动点掉它，等主窗口可用后返回。
-        ★ 2026-10-30（用户反馈「每次进入 AE 都要很久」）：
-          原来这里【同步】调用 launch_ae(timeout=30)，而 AE 冷启动实测就要
-          10 秒以上（Adobe 自身开销，与本工具无关）—— 这 10 秒里 QML 主线程
-          被这个 Slot 卡住，整个界面不刷新，用户看到的「很久」有一半是界面
-          假死。现在改成丢到 Worker 后台线程：窗口立刻可以操作、可以正常
-          关闭，AE 就绪后再 toast + 自动适配。
+        2026-10-30：AE 冷启动实测超过 10 秒。同步调用 launch_ae 会让 QML
+        主线程无法刷新。使用后台线程启动，主窗口就绪后再提示并检查适配。
         """
         try:
             from core.aelaunch import launch_ae
@@ -4086,10 +4064,10 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
           用 Windows DPAPI：密钥由系统托管、绑定当前用户，
           拷到别的机器/别的账户都解不开，且程序里不存任何主密钥。
 
-        ★★ 2026-10-23 用户报障「退出重进 Key 被自动替换」后加固：
-          · 空串【绝不写盘】，只清内存（防止失焦时把已保存的 Key 冲掉）
-          · 换 Key 时旧密文自动留一份 backup（可一键恢复上一个）
-          · 成功/失败都给明确提示，不再"悄悄改掉"
+        保留已保存的密钥和上一份可用密文：
+          · 空串只清内存，防止输入框失焦时覆盖磁盘上的密钥。
+          · 更换密钥时备份旧密文，支持恢复。
+          · 显示保存成功或失败。
         """
         v = (v or "").strip()
         if not v:
@@ -4336,18 +4314,8 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
 
             return [x for x in dict.fromkeys(out) if x], n_effect, n_param, n_other
 
-        # ★★ 2026-10-23 关键修复（用户问「BCC+Swish Glow -> BCC+嗖嗖辉光 对吗」）：
-        #   不对。"Swish" 在影视语境是【甩镜/扫掠】，AI 译成拟声词"嗖嗖"了。
-        #
-        #   根因：Translator 支持 glossary（术语表）参数，但这里从来没传过 ——
-        #   字典里明明已经有 "BCC Swish Pan OBSOLETE" -> "BCC 快速摇摄"、
-        #   "uni.Swish Pan" -> "uni.快速摇镜" 这些正确译法，
-        #   AI 一条都看不到，只能自己瞎猜。
-        #
-        #   现在把词典里已有的译文作为术语表传进去。
-        #   build_messages 里的 _pick_glossary 会按本批名字做
-        #   【精确命中 + 词级命中】筛选，只摘出相关的几十条塞进 prompt，
-        #   不会把 2 万条全发出去。
+        # 向 Translator 传入词典术语。缺少词表时，模型曾将表示甩镜或扫掠的
+        # Swish 译成拟声词。_pick_glossary 通过整名和词级匹配只选本批相关术语。
         tr = Translator(cfg, cache=self._aiCache, glossary=self._terms_for_ai())
         self._translator = tr
         self._aiProgress = 0
@@ -4384,13 +4352,8 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
                 self.aiProgressChanged.emit()
                 self.toast.emit("info", "勾选的插件都已命中词典，无需翻译")
                 return
-            # ★★ 2026-10-23 用户报「还是有没翻译的，但是那里扫描却扫描不出来」：
-            #   原来这里只收 accepted_entries —— 被闸门拒绝的条目【完全消失】。
-            #   用户看到的只是"草稿里没有这几条"，完全不知道它们其实被 AI
-            #   翻成了垃圾（如 "BCC BC"）然后被拒。
-            #
-            #   现在：通过的 + 被拒的 + 未译的全部列进草稿，被拒的带 reason，
-            #   UI 用红色标出来，用户可以就地手填，或者知道要去手动补。
+            # 只收 accepted_entries 会遗漏被校验拒绝的条目。
+            # 草稿保留通过、拒绝和未译的条目，供查看原因和手动补译。
             draft = []
             for e in res.accepted_entries:
                 draft.append({
@@ -4424,11 +4387,8 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
                 % (acc, rej, res.cache_hits, res.progress.cost_usd)
             )
 
-            # ★★ 2026-10-23 用户报「显示没有，但是实际上没翻译」：
-            #   截图里是「通过 0 · 缩短 0 · 拒绝 0 · 缓存命中 0 · 花费 $0.0000」
-            #   + 草稿区空白。花 $0 说明 API 请求【一条都没成功】，
-            #   错误全被塞进 res.errors，而这里原来根本没用它 ——
-            #   界面还显示"完成"，用户完全看不出是调用失败。
+            # 请求全部失败时，草稿为空且统计为零。展示 res.errors，
+            # 让全量请求失败能和无需翻译的结果区分。
             if res.errors:
                 n_err = len(res.errors)
                 self._aiDraftSummary += " · ⚠ %d 批失败" % n_err
@@ -4824,29 +4784,18 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
                 pass
             self.engineSessionChanged.emit()
         if self._busy or self._engineBusy or not self._inv:
-            # ★ 带原因和时间戳：固定字符串会被 _live_watch_log 去重，
-            #   用户只看到「一直在等待」，看不到卡在 busy/engine/inv 哪一个。
+            # 固定字符串会被去重。记录当前等待的条件和时间。
             _why = ("busy" if self._busy else
                     "engine" if self._engineBusy else "noinv")
             self._live_watch_log(
                 "等待应用空闲/清单就绪(%s) %s"
                 % (_why, time.strftime("%H:%M:%S")))
             return
-        # ★ 2026-11-07 修：channelState()[0] 要求「所有组都开」——用户只关掉
-        #   UI 上的「效果名」开关时，未选中的组仍带着 CH_EFFECT，判断为 True，
-        #   于是关着通道还在挂 hook、还在补写（用户实测：关掉后新加效果仍汉化）。
-        #   这里改成「有没有任何一个**选中**的组开着效果名通道」，与下面一致。
+        # 未选中的组仍可能带有 CH_EFFECT。判断自动补写时只检查选中的组，
+        # 避免关闭效果名通道后还给新实例写入译名。
         from core.inventory import CH_EFFECT as _CH_EFF
-        # ★ 2026-11-07 晚：不能用 g.selected —— UI 上的通道开关只改
-        #   g.channels，不碰 selected；按 selected 判断会出现「界面明明开着、
-        #   日志却说是关着」还把钩子停掉。与 channelState() 保持一致。
-        # ★ 2026-11-07 晚：唯一真相 = UI 自己的回显 channelState()[0]。
-        #   之前用 g.selected / 手写 any() 判断，出现「界面明明开着、日志却
-        #   说关着并把钩子停掉」的不一致。
-        # ★ 2026-11-08：优先用「用户点击意图」_effWant —— QML 每次点开关都会
-        #   经 setChannelAuto 写它，可靠；只有从没点过（None）才读 channelState。
-        #   反过来不行：清单重建/load_selection 期间 channelState 会短暂变
-        #   False，拿它当唯一真相会把钩子停掉 → 用户看到「第二遍开通道不生效」。
+        # 优先使用由 setChannelAuto 记录的显式开关意图。没有记录时读取
+        # channelState()。清单重建期间的瞬时 False 可能让再次启用失败。
         _want = getattr(self, "_effWant", None)
         if _want is not None:
             _eff_on = bool(_want)
@@ -4860,10 +4809,8 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
             self._liveAutoInflight = False  # 清掉可能卡住的在飞标记
             self._live_hook_stop("tick-off want=%r" % (getattr(self, "_effWant", None),))
             self._liveSeen.clear()
-            # ★ 2026-11-07：关着也要把「已经是中文」的标题还原成英文。
-            #   工程文件里可能带着中文效果名（写 +0x10 那版留下的污染），
-            #   AE 一打开工程这些中文就进了实例的显示名缓存，关着不还原就会
-            #   一直留着 —— 用户看到的就是「关掉通道重进 AE 还是中文」。
+            # 旧版将 +0x10 写进工程，重开工程时可能加载已保存的中文标题。
+            # 效果名通道关闭时也执行还原。
             self._live_revert_tick()
             return
         # 通道开着才进入写入流程；在飞检查放在这里，关通道不受它阻挡。
@@ -5058,12 +5005,9 @@ class AppBackend(WallpaperUiMixin, SettingsUiMixin, QObject):
             language = self.channelState()[1]
             return BackgroundState(
                 shutting_down=self._liveShutdown,
-                engine_busy=self._engineBusy,
                 language_disabled=self._langWant is False,
                 language_configured=self._inv is not None or bool(self._reopenedBackground),
                 language_command=self._engineSession.requested_language_command(language),
-                engine_detected=self._engine.running,
-                stop_unconfirmed=self._engineSession.stop_result is False,
             )
 
     def background_operations_busy(self, *, include_panel: bool = False) -> bool:
@@ -5732,9 +5676,7 @@ if (f) { f.open('w'); f.write(r); f.close(); }
             procs = _proc.list_ae_processes()
         except Exception:
             return
-        # ★ 2026-11-07 晚：不能用 len(procs) != 1 —— 之前卡死的 JSX 转发
-        #   会在多进程时让整条还原链路永远 return（用户看到「关通道不还原」）。
-        #   改成挑第一个「有主窗口」的 AE。
+        # JSX 转发可能留下额外进程。选用第一个有主窗口的 AE 执行还原。
         p = None
         for q in procs:
             try:
@@ -5786,16 +5728,14 @@ if (f) { f.open('w'); f.write(r); f.close(); }
 
         self._run(work, done, _silent=True, _toast_fail=False)
 
-    # ★ 效果名自动补写的 AE 存活稳定窗(秒)：2026-11-02 起为 0 —— 主窗口就绪
-    #   即写，用户要的是「零延迟」。原 45 秒是 2026-11-01 对崩溃循环的保守猜测，
-    #   真正根因已定位为 frida trampoline 的 NOP 填充(见 guard_uni 模块补丁)。
+    # AE 主窗口就绪后立即补写。早期用 45 秒稳定窗规避崩溃循环，
+    # 后来定位到 Frida trampoline 的 NOP 填充（见 guard_uni）。
     _LIVE_STABLE_SECS = 0.0
 
     def _live_watch_log(self, note: str) -> None:
         """效果名常驻补写的诊断日志(状态变化才写一行,<数据根>/live_watch.log)。
 
-        ★ 2026-11-01 事故教训:watcher 静默失败,用户只看到「没生效」,
-          外部连它卡在哪一环都看不到 —— 每个闸门的去向必须留痕。
+        记录每个跳过步骤的原因，便于定位常驻补写在哪个条件等待或失败。
         """
         if note == getattr(self, "_liveWatchLastNote", None):
             return
@@ -5943,9 +5883,8 @@ if (f) { f.open('w'); f.write(r); f.close(); }
                 #   实例**的 +display_off 显示名 wstring 缓存（25.5 = 0xF0）。
                 #   ① 实例的 +0x10 根本不是名字（普查 40 条实例全是乱码），
                 #      旧版拿 +0x10 当判据 → 一个实例都认不出（日志 inst=0）；
-                #   ② +0x10 会被 AE 序列化进工程（fnma chunk），写它污染工程 ——
-                #      用户「关掉通道重进 AE 还是中文」就是这么来的（工程已脏）；
-                #      而 +0xF0 不进工程，所以旧版 11-06 一直安全且有效。
+                #   ② AE 会将 +0x10 序列化到工程的 fnma chunk，重开工程会保留译名。
+                #      +0xF0 只保留在运行时，适合临时更改标题。
                 #   ③ 面板标题实测跟着 +0xF0 变（2026-11-07 13:2x 截屏）。
                 #   注册表条目（vtable = flt+fc_vtable）只读不写 → 顶部菜单英文。
                 _t3 = time.monotonic()
@@ -5970,11 +5909,8 @@ if (f) { f.open('w'); f.write(r); f.close(); }
                 # 还原账本(本程序数据目录,不含任何 AE 文件):关通道时按它写回英文
                 liveparams.save_session(DATA_ROOT, pid, records)
             written = int(res.get("written") or 0)
-            # ★ 2026-11-07 用户实测「加效果后要等一分钟」：
-            #   名字表是启动时按注册表快照建的，新加效果的英文名不在快照里，
-            #   于是本拍判成「无译文」跳过，要等缓存失效（改勾选/重启）才进表。
-            #   这里对本拍发现的「无译文」实例名，用**完整词典**补译一轮并
-            #   立即再写一次 —— 延迟从一分钟降到一拍（0.4 秒）。
+            # 启动时的注册表快照会漏掉新实例的名称。用完整词典查找本轮未译名称，
+            # 同一轮重新写入。实测延迟从约一分钟降到一轮（0.4 秒）。
             _un0 = [n for n in (res.get("untranslated") or []) if n]
             if _un0 and not _cancelled():
                 try:
@@ -6014,9 +5950,7 @@ if (f) { f.open('w'); f.write(r); f.close(); }
                             % (len(_extra), ",".join(sorted(_extra)[:12])))
                 except Exception as _e2:
                     self._live_watch_log("补译失败:%s" % str(_e2)[:140])
-            # ★ 诊断(2026-11-07 用户反馈「别的图层新加效果还是英文」):
-            #   把「发现了但没有译文」的效果名和「本拍发现的实例」写进日志 —
-            #   缺词和写失败在日志里必须能分开。
+            # 同时记录本轮实例与无译名效果，便于区分缺词和写入失败。
             _un = [n for n in (res.get("untranslated") or []) if n]
             if _un:
                 self._live_watch_log(
@@ -6203,10 +6137,7 @@ if (f) { f.open('w'); f.write(r); f.close(); }
         ★ intent_gen：OFF 点击的代号。用户马上又点 ON 时，这里每一步都会
           发现代号已变并放弃，不会把中文又写回英文。
         """
-        # ★ 2026-11-07 21:05 修：先停挂钩再还原。
-        #   用户实测「关通道后仍中文」，日志里从头到尾没有「显示名挂钩已停用」
-        #   —— 因为 liveRestore 只做了还原、没卸载 hook，挂钩在读路径上立刻又
-        #   把名字改回中文，看起来就是「还原不起作用」。
+        # 先停挂钩，再还原名称。读路径的挂钩仍在时，会在下一次读取时恢复译名。
         # ★ 2026-11-09：手动 liveRestore 没有代号，force=True 保持原语义；
         #   开关路径传了代号，由 _live_hook_stop 自己按最新意图判断。
         self._live_hook_stop("restore", force=(intent_gen is None))
@@ -6293,7 +6224,7 @@ if (f) { f.open('w'); f.write(r); f.close(); }
 
         self._run(work, done, _busy_text="正在刷新效果面板…")
 
-    # ---- 自动适配(2026-10-28,用户要求「自动适配 ae 版本」)----
+    # ---- AE 构建自动适配 ----
 
     def _running_ae_version(self, procs=None) -> str:
         """唯一运行中 AE 的构建号;没有/多个返回空串。"""
@@ -6385,7 +6316,8 @@ if (f) { f.open('w'); f.write(r); f.close(); }
             if _proc.module_digest(p, flt["path"]) != profile.flt_sha:
                 raise RuntimeError("运行中的 AE 与扫描的安装文件不同，请重试")
             if not popup_only:
-                catalog = paramnative.probe_catalog(p, timeout=60)
+                catalog = paramnative.probe_catalog(
+                    p, timeout=60, expected_version=paramnative.host_version_of(profile))
             p.ensure_alive()
             hosts = _proc.list_ae_hosts()
             if len(hosts) != 1 or hosts[0] != procs[0]:
@@ -6459,16 +6391,15 @@ if (f) { f.open('w'); f.write(r); f.close(); }
             elif res.get("blocked"):
                 self._autoAdaptStatus = f"AE {version} 适配未通过：{res['blocked']}"
                 self._live_watch_log(self._autoAdaptStatus)
-            elif res.get("adopted"):
-                reason = res.get("parameter_draw_error")
-                if reason:
-                    self._autoAdaptStatus = f"AE {version} 参数名绘制校验未通过：{reason}"
+            elif res.get("adopted") or res.get("popup_blocked"):
+                self._autoAdaptStatus = _adaptation_warning(version, res)
                 self._live_watch_log(self._autoAdaptStatus or "已自动适配 AE " + res["version"])
                 self.toast.emit(
-                    "warn" if reason else "info",
+                    "warn" if self._autoAdaptStatus else "info",
                     self._autoAdaptStatus or "已验证 AE %s 的本机适配（编码 %s）"
                     % (res["version"], res["encoding"]))
-                if reason:
+            if res.get("adopted"):
+                if res.get("parameter_draw_error"):
                     QTimer.singleShot(0, self._auto_restore_engine_async)
                 else:
                     QTimer.singleShot(0, lambda: self._auto_restore_engine_async(
@@ -6490,15 +6421,18 @@ if (f) { f.open('w'); f.write(r); f.close(); }
         res = self._adapt_running_ae()
         if res.get("blocked"):
             raise RuntimeError(res["blocked"])
-        if res.get("adopted"):
+        warning = _adaptation_warning(version, res)
+        if warning:
+            self.toast.emit("warn", warning)
+        elif res.get("adopted"):
             self.toast.emit("info", "已自动适配 %s(编码 %s)"
                             % (res["version"], res["encoding"]))
 
     @Slot()
     def corpusFullDiff(self):
-        """语料全量对照(一次性,2026-10-29 用户要求):运行时真值语料 ↔ 词典
-        差集,把【全部效果的参数名和下拉项】缺译一次列进补词 —— 不依赖
-        AE 里加了什么效果、也不需要引擎/内存布局,纯离线对照。
+        """一次性对照运行时语料和词典，列出各效果的参数与下拉缺词。
+
+        语料对照离线运行，无需在 AE 工程中添加效果。
         按第三方出现频次降序;结果并入补词列表(catalogItems)。
         """
 
@@ -6606,7 +6540,7 @@ if (f) { f.open('w'); f.write(r); f.close(); }
             from core import paramcatalog, paramnative, proc
             from core.diag import is_placeholder
 
-            procs = proc.list_ae_processes()
+            procs = proc.list_ae_hosts()
             if len(procs) != 1:
                 raise RuntimeError("需要恰好一个运行中的 AE(当前 %d 个)" % len(procs))
             resolved = self._store.resolve()
@@ -6642,6 +6576,8 @@ if (f) { f.open('w'); f.write(r); f.close(); }
                         procs[0].get("fileVersion") or "", data_root=DATA_ROOT)
                     res = paramnative.run_native(p, [], action="catalog",
                                                  timeout=150, profile=prof)
+                    if res.get("error"):
+                        raise RuntimeError("读取 AE 参数名失败：" + str(res["error"]))
                     for r in res.get("parameters") or []:
                         try:
                             effect = json.loads(r.get("id") or "[]")[0]

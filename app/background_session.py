@@ -19,12 +19,9 @@ class AutomaticClose(Enum):
 @dataclass(frozen=True)
 class BackgroundState:
     shutting_down: bool
-    engine_busy: bool
     language_disabled: bool
     language_configured: bool
     language_command: LanguageCommand | None = None
-    engine_detected: bool = False
-    stop_unconfirmed: bool = False
 
 
 class BackgroundController(Protocol):
@@ -34,6 +31,7 @@ class BackgroundController(Protocol):
     def background_engine_enabled(self) -> bool: ...
     def notify_background(self, level: str, message: str) -> None: ...
     def shutdown(self) -> None: ...
+    def stop_for_exit(self) -> None: ...
 
 
 def should_open_workspace(*, automatic):
@@ -102,27 +100,13 @@ class BackgroundSession:
 
     def request_close(self):
         controller = self._controller
-        state = controller.background_state()
-        if self._handoff_prepared or state.shutting_down:
+        if self._handoff_prepared or controller.background_state().shutting_down:
             return True
-        if state.engine_busy:
-            controller.notify_background("info", "汉化引擎正在切换，请稍候再关闭窗口。")
+        if self.workspace_busy():
+            controller.notify_background("info", "当前操作完成后即可退出。")
             return False
-        if state.stop_unconfirmed:
-            controller.notify_background("warn", "还未确认引擎已停止，请在引擎页查看状态。")
-            return False
-        if controller.background_engine_enabled():
-            status = engine.control_status()
-            confirmed = engine.profile_runtime_confirmed(status)
-            if controller.background_needs_effects_controller() and (state.engine_detected or confirmed):
-                controller.notify_background("info", "还未确认效果名可继续在后台运行，工作台已保留。")
-                return False
-            if (status.get("mode") == "on" and confirmed) or (
-                state.engine_detected and state.language_configured and not state.language_disabled
-            ):
-                return self.prepare_language_handoff()
-        controller.shutdown()
-        return True
+        controller.stop_for_exit()
+        return False
 
     def automatic_close(self, *, supports_effects_background):
         if not engine.background_on_ae_startup():

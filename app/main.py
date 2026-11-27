@@ -203,7 +203,7 @@ def _find_qml_item(item, name: str, depth: int = 0):
 def _snapshot(path: str, index: int = 0, wait_ms: int = 2500, scan: bool = False,
               tab: int = -1) -> int:
     """无头渲染：加载界面、切到指定页/工作台 Tab、截图保存。"""
-    from PySide6.QtCore import QTimer, QUrl
+    from PySide6.QtCore import QTimer, QUrl, Qt
     from PySide6.QtGui import QGuiApplication
     from PySide6.QtQml import QQmlApplicationEngine
     from PySide6.QtQuick import QQuickWindow
@@ -225,6 +225,7 @@ def _snapshot(path: str, index: int = 0, wait_ms: int = 2500, scan: bool = False
 
     backend = AppBackend()
     app.aboutToQuit.connect(backend.shutdown)
+    backend.exitReady.connect(app.quit, Qt.QueuedConnection)
     engine = QQmlApplicationEngine()
     _add_import_path(engine)
     engine.rootContext().setContextProperty("appBackend", backend)
@@ -510,6 +511,8 @@ def _main_inner() -> int:
 
 
 def _run_gui(lease) -> int:
+    from PySide6.QtCore import Qt
+
     from app.workspace_window import WorkspaceApplication, WorkspaceWindow
 
     ok = _prepare_web_engine()
@@ -522,6 +525,7 @@ def _run_gui(lease) -> int:
     app.setQuitOnLastWindowClosed(False)
     backend = AppBackend()
     app.aboutToQuit.connect(backend.shutdown)
+    backend.exitReady.connect(app.quit, Qt.QueuedConnection)
     workspace = WorkspaceWindow(app, backend, lease, QML_DIR)
     from core.engine import background_on_ae_startup
 
@@ -533,12 +537,12 @@ def _run_gui(lease) -> int:
         _log("QML 加载失败")
         return 1
     if start_background:
-        _close_after_language_restore(app, workspace.window, backend.background_session)
+        _close_after_language_restore(app, workspace.window, backend.background_session, workspace.runInBackground)
     _log("界面已加载，进入事件循环")
     return app.exec()
 
 
-def _close_after_language_restore(app, window, session):
+def _close_after_language_restore(app, window, session, keep_background):
     """Let ordinary startup finish; only retire a confirmed, unused automatic window."""
     from PySide6.QtCore import QEvent, QObject, QTimer
     from app.background_session import AutomaticClose
@@ -570,8 +574,10 @@ def _close_after_language_restore(app, window, session):
         action = session.automatic_close(supports_effects_background=app.platformName() == "windows")
         if action is not AutomaticClose.WAIT:
             cancel_watch()
-            if action in (AutomaticClose.CLOSE, AutomaticClose.KEEP_BACKGROUND):
+            if action is AutomaticClose.CLOSE:
                 window.close()
+            elif action is AutomaticClose.KEEP_BACKGROUND:
+                keep_background()
 
     timer.timeout.connect(check)
     timer.start()

@@ -40,7 +40,7 @@ class BackgroundEntry(QWindow):
     """A minimized native window. Its taskbar entry also works without a system tray."""
 
     reopen = Signal()
-    showEngine = Signal()
+    exitRequested = Signal()
     showSettings = Signal()
     showWorkbench = Signal()
     background_title = "AeLocalizer · 后台汉化"
@@ -94,7 +94,7 @@ class BackgroundEntry(QWindow):
             event.accept()
             return
         event.ignore()
-        self.showEngine.emit()
+        self.exitRequested.emit()
 
 
 class WorkspaceWindow(QObject):
@@ -118,13 +118,16 @@ class WorkspaceWindow(QObject):
         backend.engineSessionChanged.connect(self.availabilityChanged)
 
     @Property(bool, notify=availabilityChanged)
-    def effectsCanStay(self):
-        return self.app.platformName() == "windows" and self.session.effects_can_stay()
+    def canRunInBackground(self):
+        return self.app.platformName() == "windows" and (
+            self.session.effects_can_stay() or self.session.language_can_stay())
 
     def open(self):
         from PySide6.QtQml import QQmlApplicationEngine
         from PySide6.QtQuick import QQuickWindow
+        from app.windows_frame import configure_workspace_renderer
 
+        configure_workspace_renderer()
         engine = QQmlApplicationEngine()
         engine.addImportPath(self.qml_dir)
         ctx = engine.rootContext()
@@ -204,10 +207,11 @@ class WorkspaceWindow(QObject):
             entry.add_workspace_menu(hwnd)
         return entry
 
-    def _show_entry(self, entry):
+    def _show_entry(self, entry, *, restore_workbench=False):
         self.entry = entry
-        entry.reopen.connect(self._restore, Qt.QueuedConnection)
-        entry.showEngine.connect(self._restore_for_stop, Qt.QueuedConnection)
+        restore = self._open_full_workbench if restore_workbench else self._restore
+        entry.reopen.connect(restore, Qt.QueuedConnection)
+        entry.exitRequested.connect(self._exit_from_background, Qt.QueuedConnection)
         entry.showSettings.connect(self._show_settings, Qt.QueuedConnection)
         entry.showWorkbench.connect(self._open_full_workbench, Qt.QueuedConnection)
         entry.showMinimized()
@@ -216,25 +220,26 @@ class WorkspaceWindow(QObject):
     def requestClose(self):
         if self.app.isSavingSession() or getattr(self.app, "exiting", False):
             return True
-        if not self.effectsCanStay:
-            accepted = self.session.request_close()
-            if accepted:
-                QTimer.singleShot(0, self.app.quit)
-            return accepted
-        if not self.pending:
-            if self.session.workspace_busy():
-                self.backend.toast.emit("info", "当前操作完成后即可转入后台。")
-            else:
-                self.pending = True
-                QTimer.singleShot(0, self._suspend)
-        # Unwind the active QML close handler before disposing of the engine.
-        return False
+        accepted = self.session.request_close()
+        if accepted:
+            QTimer.singleShot(0, self.app.quit)
+        return accepted
+
+    @Slot()
+    def runInBackground(self):
+        if self.pending:
+            return
+        if self.session.workspace_busy():
+            self.backend.toast.emit("info", "当前操作完成后即可转入后台。")
+            return
+        self.pending = True
+        QTimer.singleShot(0, self._suspend)
 
     def _suspend(self):
         self.pending = False
         if self.window is None:
             return
-        if not self.effectsCanStay or self.session.workspace_busy():
+        if not self.canRunInBackground or self.session.workspace_busy():
             self.backend.toast.emit("info", "当前状态已变化，工作台已保留。")
             return
         entry = self._publish_entry()
@@ -246,7 +251,7 @@ class WorkspaceWindow(QObject):
             entry.deleteLater()
             self.backend.toast.emit("warn", "无法保存后台设置，工作台已保留。")
             return
-        self._show_entry(entry)
+        self._show_entry(entry, restore_workbench=True)
         self.page = self.window.property("pageIndex")
         self.section = self.window.property("settingsSection")
         self.maximized = self.window.visibility() == QWindow.Maximized
@@ -349,8 +354,10 @@ class WorkspaceWindow(QObject):
             self.window.requestActivate()
 
     @Slot()
-    def _restore_for_stop(self):
+    def _exit_from_background(self):
+        if not self.entry:
+            return
         self.page = 2
         self._finish_restore(activate=True)
         if self.window:
-            self.backend.toast.emit("info", "要退出汉化，请点击「停止引擎」，完成后关闭工作台。")
+            self.requestClose()

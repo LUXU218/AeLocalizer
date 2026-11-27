@@ -38,6 +38,11 @@ class WindowGeometryTest(unittest.TestCase):
             ready = False
 
             @Slot(result=bool)
+            def closeToBackground(self):
+                calls.append("background")
+                return self.ready
+
+            @Slot(result=bool)
             def requestWindowClose(self):
                 calls.append("close")
                 return self.ready
@@ -71,26 +76,26 @@ class WindowGeometryTest(unittest.TestCase):
             self.assertGreaterEqual(action.mapToScene(QPointF()).x(), window.property("titleBarButtonsLeft"))
             action.forceActiveFocus(Qt.TabFocusReason)
             QTest.keyClick(window, Qt.Key_Space)
-            self.assertEqual(calls, ["close"])
+            self.assertEqual(calls, ["background"])
             self.assertTrue(window.isVisible())
 
             window.setProperty("pageIndex", 2)
             stop = window.findChild(QQuickItem, "engineStopAction")
             stop.forceActiveFocus(Qt.TabFocusReason)
             QTest.keyClick(window, Qt.Key_Space)
-            self.assertEqual(calls, ["close", "stop"])
+            self.assertEqual(calls, ["background", "stop"])
             self.assertTrue(window.isVisible())
 
             backend.ready = True
             self.assertTrue(window.close())
-            self.assertEqual(calls, ["close", "stop", "close"])
+            self.assertEqual(calls, ["background", "stop", "close"])
             window.show()
             backend._langWant = False
             backend.stateChanged.emit()
             app.processEvents()
             self.assertFalse(action.isVisible())
             self.assertTrue(window.close())
-            self.assertEqual(calls, ["close", "stop", "close", "close"])
+            self.assertEqual(calls, ["background", "stop", "close", "close"])
 
     def test_window_starts_inside_small_desktop_with_all_resize_edges(self):
         # Include a nonzero origin, as on a secondary screen or with a side dock.

@@ -15,6 +15,7 @@ from core import guardruntime
 from runtime import build_profile as bp
 from runtime.managed_guard import LanguageEngine
 from runtime.popup_session import PopupSession
+from tests.ae_module_fixtures import is_ae_26_3_0_87
 
 AE_ROOT = r"C:\Program Files\Adobe"
 BUILDS = {
@@ -53,22 +54,33 @@ class SixBuildMatrixTest(unittest.TestCase):
     def test_derived_values_are_exact(self):
         for year, (ver, pre, call, ret, pre_bytes, vt) in BUILDS.items():
             lib, flt = _paths(year)
-            draw = bp.draw_candidate(lib, bp.sha256_file(lib))
-            self.assertEqual(draw["known_version"], ver)
+            lib_sha, flt_sha = bp.sha256_file(lib), bp.sha256_file(flt)
+            local_draw = year == 2026 and is_ae_26_3_0_87(lib, lib_sha)
+            local_popup = year == 2026 and is_ae_26_3_0_87(flt, flt_sha)
+            if local_draw:
+                with self.assertRaises(bp.BuildMismatch):
+                    bp.draw_candidate(lib, lib_sha)
+                pre, call, ret = "0xbafe23", "0xbafe34", "0xbafe39"
+            if local_popup:
+                with self.assertRaises(bp.BuildMismatch):
+                    bp.popup_profile(flt, flt_sha)
+                vt = 0x100518
+            draw = bp.draw_candidate(lib, lib_sha, allow_unknown=local_draw)
+            self.assertEqual(draw["known_version"], "" if local_draw else ver)
             self.assertEqual(hex(draw["pre_rva"]), pre)
             self.assertEqual(hex(draw["call_rva"]), call)
             self.assertEqual(hex(draw["ret_rva"]), ret)
             self.assertEqual(draw["pre_bytes"], pre_bytes)
             self.assertEqual(draw["ret_bytes"], "90488b9424800000")
             self.assertEqual(draw["arg_slot"], 0x28)
-            self.assertTrue(draw["verified_build"])
+            self.assertEqual(draw["verified_build"], not local_draw)
             self.assertGreaterEqual(draw["confidence"], 0.70)
             self.assertGreaterEqual(draw["confidence"] - draw["runner_up"], 0.20)
-            pop = bp.popup_profile(flt, bp.sha256_file(flt))
-            self.assertEqual(pop["known_version"], ver)
+            pop = bp.popup_profile(flt, flt_sha, allow_unknown=local_popup)
+            self.assertEqual(pop["known_version"], "" if local_popup else ver)
             self.assertEqual(pop["vt_rva"], vt)
             self.assertEqual(pop["field_offset"], 0x70)
-            self.assertTrue(pop["verified_build"])
+            self.assertEqual(pop["verified_build"], not local_popup)
 
 
 @unittest.skipUnless(_present(2025), "AE2025 not present")
@@ -289,9 +301,11 @@ class ParadeVtableTest(unittest.TestCase):
     def test_derived_parade_vtable_is_exact(self):
         for year, expected in PARADE_VT.items():
             _lib, flt = _paths(year)
-            prof = bp.parade_vtable(flt, bp.sha256_file(flt))
-            self.assertEqual(prof["vt_rva"], expected, year)
-            self.assertTrue(prof["verified_build"])
+            sha = bp.sha256_file(flt)
+            local = year == 2026 and is_ae_26_3_0_87(flt, sha)
+            prof = bp.parade_vtable(flt, sha, allow_unknown=local)
+            self.assertEqual(prof["vt_rva"], 0xF8370 if local else expected, year)
+            self.assertEqual(prof["verified_build"], not local)
             self.assertEqual(prof["class_name"], bp.PARADE_CLASS)
 
     def test_unknown_sha_is_rejected(self):
@@ -437,8 +451,10 @@ class DvauiTextProfileTest(unittest.TestCase):
             path = _dvaui(year)
             if not os.path.isfile(path):
                 self.skipTest("dvaui.dll for AE%d missing" % year)
-            prof = bp.text_draw_profile(path, bp.sha256_file(path))
-            self.assertEqual(prof["known_version"], ver)
+            sha = bp.sha256_file(path)
+            local = year == 2026 and is_ae_26_3_0_87(path, sha)
+            prof = bp.text_draw_profile(path, sha, allow_unknown=local)
+            self.assertEqual(prof["known_version"], "" if local else ver)
             self.assertEqual(prof["text_offset"], self.TEXT_OFFSETS[year])
             self.assertEqual(prof["module"], "dvaui.dll")
             self.assertTrue(prof["draw_export"].startswith(
@@ -447,7 +463,7 @@ class DvauiTextProfileTest(unittest.TestCase):
                 "?GetTextString@DrawStaticTextParameters@"))
             self.assertEqual(prof["len_offset"], 0x10)
             self.assertEqual(prof["cap_offset"], 0x18)
-            self.assertTrue(prof["verified_build"])
+            self.assertEqual(prof["verified_build"], not local)
 
     def test_dvaui_export_table_is_not_truncated(self):
         path = _dvaui(2026)
@@ -480,8 +496,11 @@ class DvauiTextProfileTest(unittest.TestCase):
         path = _dvaui(2026)
         if not os.path.isfile(path):
             self.skipTest("AE2026 dvaui.dll missing")
+        version = "26.5.0.89"
+        if is_ae_26_3_0_87(path):
+            path, version = _dvaui(2025), "25.5.0.4"
         bad = dict(bp.KNOWN_TEXT_OFFSET)
-        bad["26.5.0.89"] = 0xE0
+        bad[version] = 0xE0
         with mock.patch.object(bp, "KNOWN_TEXT_OFFSET", bad):
             with self.assertRaises(bp.BuildMismatch) as cm:
                 bp.text_draw_profile(path)
@@ -491,8 +510,11 @@ class DvauiTextProfileTest(unittest.TestCase):
         path = _dvaui(2026)
         if not os.path.isfile(path):
             self.skipTest("AE2026 dvaui.dll missing")
+        version = "26.5.0.89"
+        if is_ae_26_3_0_87(path):
+            path, version = _dvaui(2025), "25.5.0.4"
         bad = dict(bp.KNOWN_TEXT_STORE)
-        bad["26.5.0.89"] = 0x10
+        bad[version] = 0x10
         with mock.patch.object(bp, "KNOWN_TEXT_STORE", bad):
             with self.assertRaises(bp.BuildMismatch) as cm:
                 bp.text_draw_profile(path)

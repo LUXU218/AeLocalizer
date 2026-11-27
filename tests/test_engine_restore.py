@@ -43,6 +43,41 @@ class GuardLockTest(unittest.TestCase):
             self.assertFalse(engine_mod.pid_is_guard(12345))
 
 
+class GuardStopTest(unittest.TestCase):
+    def setUp(self):
+        self.root = self.enterContext(tempfile.TemporaryDirectory())
+        self.enterContext(mock.patch.dict(os.environ, AELOC_DATA_ROOT=self.root))
+        self.enterContext(mock.patch.object(engine_mod, "ENGINE_DICT_DIR", self.root))
+        self.enterContext(mock.patch.object(engine_mod, "_STARTED_GUARD", None))
+        self.enterContext(mock.patch.object(engine_mod, "read_guard_lock_pid_any", return_value=0))
+        self.unrelated = self.enterContext(mock.patch.object(engine_mod, "guards_alive", return_value=True))
+        self.stopped = self.enterContext(mock.patch.object(engine_mod, "mark_stopped"))
+        self.receipt = {"protocol": "aeloc-managed-guard/1", "runtime_pid": 42,
+                        "runtime_ctime": 70, "state": "control-acked"}
+        self.enterContext(mock.patch.object(engine_mod, "control_status", return_value=self.receipt))
+        self.enterContext(mock.patch.object(engine_mod, "_proc_creation_time", return_value=70))
+        self.live = True
+        self.enterContext(mock.patch.object(engine_mod, "pid_alive", side_effect=lambda pid: self.live))
+
+    def test_stop_waits_for_owned_guard_process_even_after_its_lock_is_removed(self):
+        def finish(_):
+            self.assertTrue(os.path.isfile(os.path.join(self.root, engine_mod.STOP_FLAG)))
+            self.receipt["state"] = "stopped"
+            self.live = False
+
+        with mock.patch.object(engine_mod.time, "sleep", side_effect=finish):
+            self.assertTrue(engine_mod.stop_engine()[0])
+        self.unrelated.assert_not_called()
+        self.stopped.assert_called_once_with()
+
+    def test_exit_is_unconfirmed_if_the_guard_dies_without_restoration_receipt(self):
+        with mock.patch.object(engine_mod.time, "sleep", side_effect=lambda _: setattr(self, "live", False)):
+            ok, message = engine_mod.stop_engine()
+        self.assertFalse(ok)
+        self.assertIn("原文", message)
+        self.stopped.assert_not_called()
+
+
 class AutoEngineRestoreTest(unittest.TestCase):
     def setUp(self):
         from PySide6.QtGui import QGuiApplication

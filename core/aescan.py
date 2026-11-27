@@ -447,12 +447,12 @@ def _language_candidate(tools, profile, report):
         try:
             bp.popup_field_layout(tdb, profile.tdb_sha)
             return replace(profile, popup_layout_verified=True)
-        except bp.BuildMismatch:
+        except bp.BuildMismatch as tdb_error:
             media = tools.exe.parent / "MediaFoundation.dll"
             if (not media.is_file() or media.is_symlink() or media.is_junction()
                     or media.stat().st_size > MAX_MODULE_BYTES):
                 raise
-            stage = "TDB 与 MediaFoundation 选项指针"
+            stage = f"TDB 选项指针：{tdb_error}；MediaFoundation 选项指针"
             media_sha = bp.sha256_file(media)
             bp.media_popup_field_layout(tdb, profile.tdb_sha, media, media_sha)
             return replace(profile, popup_layout_verified=True, popup_media_sha=media_sha)

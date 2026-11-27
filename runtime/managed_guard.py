@@ -599,14 +599,16 @@ class LanguageEngine:
             # reports its own channel error instead.
             self.popup_error = ""
             try:
-                if getattr(new_draw, "popup_profile_error", ""):
-                    raise RuntimeError(new_draw.popup_profile_error)
                 new_popup = PopupSession(pid, self.data_root,
                                          self.project_root,
                                          identity=ident,
                                          plugin_hashes=plugins)
                 paint_profile = new_draw.popup_paint_profile
-                new_popup.display_only = bool(paint_profile) and not paint_profile.get("supplemental")
+                # A discovered renderer can coexist with an older, active
+                # panel. Only verified paint-only builds may skip the typed
+                # channel and its existing option discovery.
+                new_popup.display_only = bool(paint_profile.get("verified_build")
+                                              and not paint_profile.get("supplemental"))
             except Exception as _pe:
                 new_popup = None
                 self.popup_error = str(_pe)[:160]
@@ -649,14 +651,14 @@ class LanguageEngine:
                 if k not in ("capacity", "capacity-unverified", "unchanged-no-translation",
                              "unchanged-already", "off-already", "display-only")}
 
-    def _popup_progress(self):
+    def _popup_progress(self, mode):
         """Return (current_rows_complete, reason) and sync diagnostics.
 
         Only current-row completeness gates language_ready. The periodic
         full-heap parade rescan is a background discovery activity and must
         not flip an already-applied generation back to syncing. A cold start
-        with zero discovered rows is the one exception: it cannot be called
-        ready while the first discovery is still incomplete.
+        with zero discovered rows needs independent proof that the live menu
+        route has applied labels before it can acknowledge the ON request.
         """
         stats = getattr(self.popup, "scan_stats", None) or {}
         if self.popup is None:
@@ -684,7 +686,8 @@ class LanguageEngine:
         if rows_pending:
             return False, "row-pass-pending:%s" % (stats or {})
         if rows <= 0 and discovery_pending:
-            # Cold start: no discovered row yet, so "applied" would be a lie.
+            if mode == "on" and (self.draw.stats().get("layer_menu_replaced") or 0) > 0:
+                return True, ""
             return False, "discovery-pending:%s" % (stats or {})
         return True, ""
 
@@ -766,7 +769,7 @@ class LanguageEngine:
                     _redraw_host(pid, attempts=1)
                 self.popup_reasons = dict(res.get("reasons") or {})
                 self.popup_unsupported = int(res.get("skipped") or 0)
-                complete, preason = self._popup_progress()
+                complete, preason = self._popup_progress(mode)
                 if not complete:
                     return False, preason
                 # ON: capacity/no-translation of one popup value is reported
@@ -807,7 +810,7 @@ class LanguageEngine:
                     _redraw_host(pid, attempts=1)
                 self.popup_reasons = dict(res.get("reasons") or {})
                 self.popup_unsupported = int(res.get("skipped") or 0)
-                complete, preason = self._popup_progress()
+                complete, preason = self._popup_progress(mode)
                 if not complete:
                     return False, preason
                 # Same rule as apply("on")/refresh(): a per-value capacity or
@@ -861,7 +864,7 @@ class LanguageEngine:
                 _redraw_host(int(self.host["pid"]), attempts=1)
             self.popup_reasons = dict(res.get("reasons") or {})
             self.popup_unsupported = int(res.get("skipped") or 0)
-            complete, preason = self._popup_progress()
+            complete, preason = self._popup_progress(mode)
             if not complete:
                 return False, preason
             if mode == "off" and res.get("skipped"):
@@ -928,6 +931,7 @@ class LanguageEngine:
                 self._set_stop("popup-close", "popup-close-exception", repr(exc))
             self.popup = None
             self.host = None
+            self.popup_restore_unknown = False
             self._set_stop("done", "host-dead-discard")
             return True
         try:
@@ -995,6 +999,7 @@ class LanguageEngine:
             if self._host_status() == "alive":
                 _redraw_host(int(self.host["pid"]), attempts=1)
         self.host = None
+        self.popup_restore_unknown = False
         self._set_stop("done", "safe")
         return True
 
@@ -1237,8 +1242,7 @@ def main(argv):
     os.makedirs(OUT, exist_ok=True)
     os.makedirs(CTL, exist_ok=True)
     os.makedirs(TMP, exist_ok=True)
-    # 上一个守护会话的采集文件必须清掉：补词页一旦读到旧快照，就会把已经
-    # 关掉的 AE 见过的词当成当前状态（2026-11-02 用户实测过这个坑）。
+    # 启动新守护会话时清除上一会话的快照，防止补词读取已关闭 AE 的采集结果。
     for _stale in ("all_param_names.json", "renamed_names.json",
                    "rename_miss.json", "enum_missing.json", "label_diagnostics.json"):
         try:

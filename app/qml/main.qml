@@ -49,7 +49,7 @@ Window {
     Timer {
         interval: 1000
         repeat: true
-        running: root.visible && root.visibility !== Window.Minimized && !!root.backend
+        running: root.visible && root.visibility !== Window.Minimized && !root.windowResizing && !!root.backend
         onTriggered: root.backend.refreshEngineSessionDisplay()
     }
 
@@ -269,12 +269,15 @@ Window {
                     objectName: "runInBackgroundAction"
                     text: "转入后台"
                     height: 26
-                    visible: !!root.backend && (root.backend.backgroundModeAvailable || !!root.workspace && root.workspace.effectsCanStay)
-                    Accessible.description: "关闭工作台并继续汉化。再次打开 AeLocalizer 可修改设置或停止引擎。"
+                    visible: !!root.backend && (root.workspace ? root.workspace.canRunInBackground : root.backend.backgroundModeAvailable)
+                    Accessible.description: "继续后台汉化。点击 Windows 任务栏上的 AeLocalizer 即可返回工作台。"
                     Basic.ToolTip.text: Accessible.description
                     Basic.ToolTip.visible: hovered
                     Basic.ToolTip.delay: 500
-                    onClicked: root.close()
+                    onClicked: {
+                        if (root.workspace) root.workspace.runInBackground()
+                        else if (root.backend.closeToBackground()) root.close()
+                    }
                 }
 
                 Repeater {
@@ -284,7 +287,11 @@ Window {
                         { t: "✕", act: "close" }
                     ]
                     delegate: Rectangle {
+                        objectName: modelData.act === "close" ? "quitWorkspaceAction" : ""
                         width: 34; height: 26; radius: 6
+                        Basic.ToolTip.text: "退出并恢复原文"
+                        Basic.ToolTip.visible: modelData.act === "close" && area.containsMouse
+                        Basic.ToolTip.delay: 500
                         color: area.containsMouse
                                ? (modelData.act === "close" ? Theme.danger : Theme.bgHover)
                                : "transparent"

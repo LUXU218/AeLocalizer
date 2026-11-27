@@ -1,9 +1,9 @@
 """运行时引擎管理：guard_uni（参数名/下拉值）+ 官方 UTF-8 Fixer（2026 编码兼容）。
 
-★ 设计原则（用户明确要求）：
-  1. 引擎【不重写】—— guard_uni 已在真机验证可用，直接复用
-  2. Fixer【不改造】—— 官方 MIT 版本，只在 AE 2026+ 启用
-  3. 软件层只负责：选择 / 词典 / 应用 / 回滚 / 版本门控
+设计约束：
+  1. 复用经过实机验证的 guard_uni 引擎。
+  2. AE 2026 及以上使用原版 MIT UTF-8 Fixer。
+  3. 软件层管理选择、词典、应用、回滚和版本门控。
 
 三层职责：
   L1 静态层   .aex PiPL（效果名、分类名）  -> 本工具直接改文件
@@ -283,6 +283,7 @@ def ae_running() -> List[int]:
 #   engine_running 的启发式会假报"运行中",按钮状态与状态栏打架。
 #   stop/start 时更新;95 秒内强制 False(除非重新启动清零)。
 _STOPPED_AT = 0.0
+_STARTED_GUARD = None
 
 
 def mark_stopped() -> None:
@@ -481,7 +482,7 @@ def start_engine(
             # 调用方（GUI/driver）的 stdin。若继承的是带后台 reader 线程的共享
             # 管道，Windows 上子进程 Python 启动早期的 CRT stdio 位置查询会阻塞
             # （实测 992s 级，且与 reader 是否释放同刻恢复）。2026-11-14 定位。
-            subprocess.Popen(
+            child = subprocess.Popen(
                 build_engine_command(guard_path, dict_dir, mode="apply",
                                      hold_seconds=hold_seconds),
                 cwd=os.path.dirname(guard_path),
@@ -491,8 +492,9 @@ def start_engine(
                 stderr=subprocess.STDOUT,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
-        global _STOPPED_AT
+        global _STOPPED_AT, _STARTED_GUARD
         _STOPPED_AT = 0.0
+        _STARTED_GUARD = child
         return True, log
     except Exception as exc:
         return False, "启动失败：%s" % exc
@@ -817,20 +819,11 @@ def force_kill_guards() -> int:
 
 
 def stop_engine(timeout: float = 12.0) -> tuple:
-    """优雅停止引擎（写 STOP_NOW.flag，等它自己卸载 hook）。
-
-    ★ 为什么不直接 kill：引擎在 detach 时会恢复 FLT.dll 的序言字节。
-      强杀会把被改过的字节留在 AE 进程里，下次注入可能失败。
-
-    ★★ 2026-10-28 实测修复成功判据：engine_running() 是「日志心跳 90 秒
-      保鲜」的启发式 —— 守护收到 flag 后 2 秒就优雅退出了（日志实锤
-      「已安全卸载(序言已恢复)」），心跳却还要保鲜 90 秒，原来只等
-      12 秒 = 永远误报「未退出」。现在改用进程判据（guard_pids 清空）
-      为准；心跳判据只留给 UI 展示。
-    """
-    import time
-
+    """Signal this profile's guard to restore native text and wait for its exit."""
     flag = os.path.join(ENGINE_DICT_DIR, STOP_FLAG)
+    initial = _control_runtime_identity(control_status())
+    expected = initial if _runtime_identity_alive(initial) else None
+    isolated = bool(os.environ.get("AELOC_DATA_ROOT", "").strip())
     try:
         os.makedirs(ENGINE_DICT_DIR, exist_ok=True)
         with open(flag, "w", encoding="utf-8") as f:
@@ -838,24 +831,33 @@ def stop_engine(timeout: float = 12.0) -> tuple:
     except OSError as exc:
         return False, "无法写入停止标志：%s" % exc
 
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        # 高权 guard 的 CIM 可能读不到；只要 lock PID 仍活就不能提前删 flag。
-        if (not guards_alive()
-                and (os.environ.get("AELOC_DATA_ROOT")
-                     or not guard_locks_alive(DATA_ROOT))):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        status = control_status()
+        identity = _control_runtime_identity(status)
+        if _runtime_identity_alive(identity):
+            expected = identity
+        child = _STARTED_GUARD
+        # The guard removes its lock just before returning. Keep waiting on the
+        # process once its identity is known, including that last interval.
+        if (not _runtime_identity_alive(expected)
+                and not (child is not None and child.poll() is None)
+                and not read_guard_lock_pid_any()
+                and (isolated or not (guards_alive() or read_legacy_guard_lock_pid_any(DATA_ROOT)))):
             try:
                 os.remove(flag)
             except OSError:
                 pass
-            global _STOPPED_AT
-            _STOPPED_AT = time.time()
+            if expected and (identity != expected or status.get("state") != "stopped"
+                             or status.get("popup_restore_unknown")):
+                return False, "引擎已退出，但未确认 AE 原文已恢复。"
+            mark_stopped()
             return True, "引擎已停止"
         time.sleep(0.5)
 
     # 进程还在：守护卡死无视 flag（2026-10-25 实翻车形态）。
     # 返回失败由调用方决定「止血」；flag 留着，守护恢复轮询后仍会自己退出。
-    return False, "引擎在 %.0f 秒内未退出（可稍后重试，或点「止血」）" % timeout
+    return False, "%.0f 秒内未确认原文恢复和引擎退出，请稍候重试。" % timeout
 
 
 def prepare_dict(
@@ -932,19 +934,33 @@ def control_status() -> dict:
         return {}
 
 
+def _control_runtime_identity(status):
+    if status.get("protocol") != "aeloc-managed-guard/1":
+        return None
+    try:
+        pid = int(status["runtime_pid"])
+        ctime = int(status["runtime_ctime"])
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return None
+    return (pid, ctime) if pid > 0 and ctime > 0 else None
+
+
+def _runtime_identity_alive(identity):
+    return bool(identity and pid_alive(identity[0]) and _proc_creation_time(identity[0]) == identity[1])
+
+
 def profile_runtime_confirmed(status=None) -> bool:
     """A current control receipt belongs to this data root and a live runtime."""
     if status is None:
         status = control_status()
-    if status.get("protocol") != "aeloc-managed-guard/1" or status.get("control_ready") is not True:
+    identity = _control_runtime_identity(status)
+    if not identity or status.get("control_ready") is not True:
         return False
     try:
-        pid = int(status["runtime_pid"])
-        ctime = int(status["runtime_ctime"])
         age = time.time() - float(status["updated"])
     except (KeyError, TypeError, ValueError, OverflowError):
         return False
-    return pid > 0 and ctime > 0 and 0 <= age <= 90 and _proc_creation_time(pid) == ctime
+    return 0 <= age <= 90 and _proc_creation_time(identity[0]) == identity[1]
 
 
 def _profile_runtime_mutex_exists() -> bool:

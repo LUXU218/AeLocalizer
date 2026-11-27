@@ -397,9 +397,8 @@ function putDisp(obj, off, w, zh) {
     return true;
 }
 // 入参 wstring（const std::wstring&）→ 就地改中文。
-// ★ 2026-11-07 20:30：面板拿到 SetDisplayName 的入参后**立刻**用它画标题，
-//   所以只有改入参才能「加效果瞬间就是中文」；改 +0xF0 缓存要等面板重建
-//   （切图层）才生效，用户明确不接受。
+// 效果控件用 SetDisplayName 入参绘制首帧。就地替换入参可立即显示译名，
+// +0xF0 缓存变更要等面板重建才可见。
 function putArg(p, w, zh) {
     var n = zh.length;
     if (n > w.cap) return false;
@@ -508,8 +507,8 @@ try {
 //   AfterFXLib 的 EDB_DrawString(drawbot, color&, font*, x, y, const wstring&, ...)
 //   —— wstring 是第 4 个整型参数（r9）。在这里把文本换成目标语言，
 //   下一帧就是新文字，不需要 SetName/InvalTopic/重绘。
-//   用 CTopicPane::DrawName 的进出设立「正在画效果名」标志，保证只翻
-//   效果控件面板的标题，绝不碰顶部菜单（用户要求菜单保持英文）。
+// 用 CTopicPane::DrawName 的进出限制绘制范围，仅替换效果控件标题。
+// 顶部菜单继续使用原文。
 var HOOKED_GETNAME = {};
 function hookSlotE8(fn) {
     if (!fn || fn.isNull()) return;
@@ -577,9 +576,8 @@ function _onLeaveDrawName() { if (IN_NAME > 0) IN_NAME--; }
 // ★ 2026-11-08：类层次有 CTopicPane / CTLTopicPane / CTLStream 三种 DrawName
 //   导出（实测 AfterFXLib 2025 三个都在）。只挂基类会漏 —— 25.5 的面板行是
 //   CTLTopicPane 实例，所以 PANES 一直是 0、关通道后没法触发重绘。
-// ★ 2026-11-08：不要再挂 CTLStream::DrawName —— 它被每个流每帧调用，
-//   挂上去会把 AE 绘制拖到极慢，进而让我们的同步 RPC 全部卡死
-//   （用户实测：程序还开着但日志完全不动、新效果也不汉化）。
+// CTLStream::DrawName 每个流每帧都会调用，挂钩会拖慢绘制并阻塞同步 RPC。
+// 这里只挂效果标题对应的入口。
 var _NAME_SYMS_ALL = [_NAME_SYM,
     '?DrawName@CTLTopicPane@@UEAAXPEAVDrawbot@drawbot@dvaui@@@Z'];
 for (var _ni = 0; _ni < _NAME_SYMS_ALL.length; _ni++) {

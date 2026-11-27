@@ -4,7 +4,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import Mock, PropertyMock, call, patch
 
-from PySide6.QtCore import QCoreApplication, QDeadlineTimer, QEvent, QObject
+from PySide6.QtCore import QCoreApplication, QDeadlineTimer, QEvent, QMetaObject, QObject
 from PySide6.QtGui import QGuiApplication
 from shiboken6 import isValid
 
@@ -25,7 +25,7 @@ class WorkspaceWindowTest(unittest.TestCase):
         self.lease.publish_window.return_value = True
         self.workspace = WorkspaceWindow(self.app, self.backend, self.lease,
                                          str(Path(__file__).resolve().parents[1] / "app/qml"))
-        self.enterContext(patch.object(WorkspaceWindow, "effectsCanStay", new_callable=PropertyMock, return_value=True))
+        self.enterContext(patch.object(WorkspaceWindow, "canRunInBackground", new_callable=PropertyMock, return_value=True))
         self.addCleanup(self.cleanup_workspace)
 
     def pump(self):
@@ -55,8 +55,9 @@ class WorkspaceWindowTest(unittest.TestCase):
             live_at_release.append((isValid(old_window), isValid(old_engine)))
 
         with patch.object(self.backend, "shutdown") as shutdown, \
+                patch.object(self.backend, "stop_for_exit") as stop, \
                 patch.object(self.backend, "release_workspace_dictionary", side_effect=check_released) as release:
-            self.assertFalse(old_window.close())
+            self.workspace.runInBackground()
             release.assert_not_called()
             self.pump()
             self.assertIsNone(self.workspace.window)
@@ -76,11 +77,12 @@ class WorkspaceWindowTest(unittest.TestCase):
             self.workspace.window.setProperty("pageIndex", 0)
             self.pump()
             self.assertIsNotNone(self.workspace.window.findChild(QObject, "translationWorkspace"))
-            self.assertFalse(self.workspace.window.close())
+            self.workspace.runInBackground()
             self.pump()
             self.workspace.entry.close()
             self.pump()
             self.assertEqual(self.workspace.window.property("pageIndex"), 2)
+            stop.assert_called_once_with()
             shutdown.assert_not_called()
 
     def test_reopening_before_release_keeps_the_current_dictionary(self):
@@ -106,24 +108,62 @@ class WorkspaceWindowTest(unittest.TestCase):
         self.assertTrue(self.workspace.open())
         old_window = self.workspace.window
         self.backend._engineBusy = True
-        self.assertFalse(old_window.close())
+        self.workspace.runInBackground()
         self.pump()
         self.assertIs(old_window, self.workspace.window)
         self.backend._engineBusy = False
         self.lease.publish_window.return_value = False
-        self.assertFalse(old_window.close())
+        self.workspace.runInBackground()
         self.pump()
         self.assertIs(old_window, self.workspace.window)
         self.assertIsNone(self.workspace.entry)
 
-    def test_other_close_modes_use_existing_decision(self):
+    def test_workbench_close_waits_for_stop_and_can_retry_after_failure(self):
         self.assertTrue(self.workspace.open())
-        with patch.object(WorkspaceWindow, "effectsCanStay", new_callable=PropertyMock, return_value=False), \
-                patch.object(self.backend.background_session, "request_close", return_value=False) as close:
-            self.assertFalse(self.workspace.window.close())
+        old_window = self.workspace.window
+        ready = Mock()
+        self.backend.exitReady.connect(ready)
+        with patch.object(self.backend, "_run") as run, \
+                patch("core.windows_startup.cancel_standby") as cancel:
+            self.assertFalse(old_window.close())
+            self.assertIs(run.call_args.args[0], backend_module.engine.stop_engine)
+            self.assertFalse(old_window.close())
+            run.assert_called_once()
+            run.call_args.args[1]((False, "未确认原文已恢复"))
             self.pump()
-            close.assert_called_once()
+            self.assertIs(self.workspace.window, old_window)
+            self.assertTrue(old_window.isVisible())
             self.assertIsNone(self.workspace.entry)
+            ready.assert_not_called()
+            self.assertFalse(old_window.close())
+            self.assertEqual(run.call_count, 2)
+            run.call_args.args[1]((True, "引擎已停止"))
+            ready.assert_called_once_with()
+            cancel.assert_called_once_with(backend_module.DATA_ROOT)
+
+    def test_background_button_keeps_language_only_taskbar_entry_and_restores_the_page(self):
+        with patch.object(self.app, "platformName", return_value="windows"), \
+                patch.object(self.workspace.session, "effects_can_stay", return_value=False), \
+                patch.object(self.workspace.session, "language_can_stay", return_value=True):
+            self.assertTrue(self.workspace.canRunInBackground)
+        with patch.object(WorkspaceWindow, "canRunInBackground", new_callable=PropertyMock, return_value=True), \
+                patch.object(self.workspace.session, "request_close") as close, \
+                patch.object(self.workspace, "_restore") as restore_default:
+            self.assertTrue(self.workspace.open())
+            old_window = self.workspace.window
+            old_window.setProperty("pageIndex", 4)
+            button = old_window.findChild(QObject, "runInBackgroundAction")
+            self.assertTrue(QMetaObject.invokeMethod(button, "clicked"))
+            self.pump()
+            self.assertIsNone(self.workspace.window)
+            self.assertIn("后台汉化", self.workspace.entry.title())
+            close.assert_not_called()
+            self.workspace.entry.showNormal()
+            self.pump()
+            self.assertEqual(self.workspace.window.property("pageIndex"), 4)
+            self.assertIs(self.workspace.window.property("backend"), self.backend)
+            self.assertIsNone(self.workspace.entry)
+            restore_default.assert_not_called()
 
     def test_background_first_keeps_native_entry_until_manual_restore(self):
         with patch.object(self.workspace.session, "automatic_close",

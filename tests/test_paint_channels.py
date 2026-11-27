@@ -4,14 +4,19 @@ from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
 from runtime import build_profile as bp, param_draw_hook as ph
+from tests.ae_module_fixtures import is_ae_26_3_0_87
 
 class PaintTests(unittest.TestCase):
     def test_popup_layouts_come_from_six_verified_getters(self):
         for year,offset in [(2021,0x158),(2022,0x1a0),(2023,0x1c0),
                             (2024,0x1c0),(2025,0x178),(2026,0x180)]:
             p=Path(r'C:\Program Files\Adobe')/f'Adobe After Effects {year}'/'Support Files/dvaui.dll'
-            profile=bp.popup_draw_profile(p)
-            self.assertTrue(profile['verified_build'])
+            local = year == 2026 and is_ae_26_3_0_87(p)
+            if local:
+                with self.assertRaises(bp.BuildMismatch):
+                    bp.popup_draw_profile(p)
+            profile = bp.popup_draw_profile(p, allow_unknown=local)
+            self.assertEqual(profile['verified_build'], not local)
             self.assertEqual(profile['text_offset'],offset)
             self.assertEqual(len(profile['draw_exports']),2)
         with mock.patch.dict(bp.VERIFIED_DVAUI,{},clear=True):

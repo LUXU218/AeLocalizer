@@ -10,7 +10,7 @@
 .\.venv\Scripts\python.exe tools/build_exe.py
 ```
 
-打包机需要将 64 位 MinGW-w64 GCC 的 `bin` 目录加入 `PATH`，用于编译开机待机程序。默认输出为 `dist/AeLocalizer/`。分发时请压缩整个目录，保留 `AeLocalizer.exe`、`AeLocalizerStartup.exe` 和 `_internal/` 的相对位置。
+打包机需要将 64 位 MinGW-w64 GCC 的 `bin` 目录加入 `PATH`，用于编译开机待机程序和全量枚举使用的宿主身份模块。默认输出为 `dist/AeLocalizer/`。分发时请压缩整个目录，保留 `AeLocalizer.exe`、`AeLocalizerStartup.exe` 和 `_internal/` 的相对位置。
 
 使用 64 位 MinGW-w64 GCC 时，可运行 `python tools/build_native.py` 构建 `native/` 下的可选辅助 DLL。`native/utf8fixer/` 中保留修复组件的源码。构建该组件时，请从 [Adobe After Effects 开发者站点](https://developer.adobe.com/after-effects/) 自行取得适当版本的 SDK，按本地工具链配置头文件和构建工具。
 

@@ -12,6 +12,24 @@ from runtime import build_profile
 
 
 class LocalMinorProfileTest(unittest.TestCase):
+    def test_unverified_dropdown_preserves_both_validation_errors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "AfterFXLib.dll").touch()
+            (root / "MediaFoundation.dll").touch()
+            tools = SimpleNamespace(exe=root / "AfterFX.exe", module=lambda name: {"path": root / name})
+            profile = replace(adapter.PROFILES["22.6.0.64"], count_get=1, popup_layout_verified=False)
+            report = {}
+            with patch.object(build_profile, "draw_candidate", return_value={"sha256": "a" * 64}), \
+                    patch.object(build_profile, "parade_vtable", return_value={"vt_rva": 1}), \
+                    patch.object(build_profile, "popup_profile"), \
+                    patch.object(build_profile, "popup_field_layout", side_effect=build_profile.BuildMismatch("wrapper changed")), \
+                    patch.object(build_profile, "media_popup_field_layout", side_effect=build_profile.BuildMismatch("layout changed")):
+                result = aescan._language_candidate(tools, profile, report)
+            self.assertFalse(result.popup_layout_verified)
+            self.assertEqual(report["popupLayoutError"],
+                             "TDB 选项指针：wrapper changed；MediaFoundation 选项指针：layout changed")
+
     def test_only_exact_enabled_profile_authorizes_parameter_draw(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -97,6 +115,17 @@ class ClassicPopupAbiTest(unittest.TestCase):
 
 
 class DelegatedPopupAbiTest(unittest.TestCase):
+    def test_263_adapts_original_dropdown_with_matching_module_evidence(self):
+        support = Path(r"C:\Program Files\Adobe\Adobe After Effects 2026\Support Files")
+        exe = support / "AfterFX.exe"
+        if not exe.is_file() or proc.file_version(exe) != "26.3.0.87":
+            self.skipTest("AE 26.3.0.87 reference build unavailable")
+        report = aescan.analyze_install(exe)
+        profile = aescan.candidate_from_report(report)
+        self.assertTrue(profile.popup_layout_verified, report.get("popupLayoutError"))
+        self.assertEqual(profile.popup_media_sha,
+                         build_profile.sha256_file(support / "MediaFoundation.dll"))
+
     def test_media_layout_matches_installed_2025(self):
         root = Path(r"C:\Program Files\Adobe\Adobe After Effects 2025\Support Files")
         tdb, media = root / "TDB.dll", root / "MediaFoundation.dll"

@@ -50,8 +50,8 @@ class BackgroundSessionTests(unittest.TestCase):
     def test_handoff_and_manual_reopen_keep_original_service_and_generation(self):
         window = self.ui()
         with patch.object(engine, "stop_engine") as stop, patch.object(engine, "start_engine") as start:
-            self.assertTrue(window.requestWindowClose())
-            self.assertTrue(window.requestWindowClose())
+            self.assertTrue(window.closeToBackground())
+            self.assertTrue(window.closeToBackground())
             expected = engine.background_language_session()
             self.assertEqual(expected["runtime_pid"], 42)
             self.assertTrue(engine.background_on_ae_startup())
@@ -93,16 +93,16 @@ class BackgroundSessionTests(unittest.TestCase):
         self.assertIsNone(reopened._inv)
         self.assertEqual(reopened.channelState(), [False, True, True])
 
-    def test_in_progress_or_effects_keep_the_window_until_a_deliberate_stop(self):
+    def test_close_waits_for_current_operation_then_requests_stop(self):
         window = self.ui()
-        window._engineBusy = True
-        self.assertFalse(window.requestWindowClose())
-        window._engineBusy = False
         window._effWant = True
-        self.assertFalse(window.requestWindowClose())
-        self.assertFalse(window._liveShutdown)
-        settings.put(str(self.root), "engine_master_intent", False)
-        self.assertTrue(window.requestWindowClose())
+        with patch.object(window, "stop_for_exit") as stop:
+            window._engineBusy = True
+            self.assertFalse(window.requestWindowClose())
+            stop.assert_not_called()
+            window._engineBusy = False
+            self.assertFalse(window.requestWindowClose())
+            stop.assert_called_once_with()
 
     def test_logged_in_launcher_only_suppresses_confirmed_saved_session(self):
         self.assertTrue(self.ui().closeToBackground())
@@ -125,7 +125,7 @@ class BackgroundSessionTests(unittest.TestCase):
         session = Mock()
         session.automatic_close.side_effect = [AutomaticClose.WAIT, AutomaticClose.CLOSE]
         self.assertTrue(settings.put(str(self.root), "background_on_ae_startup", True))
-        main._close_after_language_restore(self.app, window, session)
+        main._close_after_language_restore(self.app, window, session, Mock())
         timer = window.findChild(QTimer)
         timer.timeout.emit()
         window.close.assert_not_called()
@@ -134,12 +134,24 @@ class BackgroundSessionTests(unittest.TestCase):
         window.close.assert_called_once()
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
+    def test_automatic_effects_startup_uses_background_action(self):
+        window = QObject()
+        window.close = Mock()
+        session = Mock()
+        session.automatic_close.return_value = AutomaticClose.KEEP_BACKGROUND
+        keep_background = Mock()
+        main._close_after_language_restore(self.app, window, session, keep_background)
+        window.findChild(QTimer).timeout.emit()
+        keep_background.assert_called_once_with()
+        window.close.assert_not_called()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
     def test_using_the_automatic_window_cancels_its_pending_close(self):
         window = QObject()
         window.close = Mock()
         session = Mock()
         self.assertTrue(settings.put(str(self.root), "background_on_ae_startup", True))
-        main._close_after_language_restore(self.app, window, session)
+        main._close_after_language_restore(self.app, window, session, Mock())
         timer = window.findChild(QTimer)
         QCoreApplication.sendEvent(window, QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_A, Qt.KeyboardModifier.NoModifier))
         self.assertFalse(timer.isActive())

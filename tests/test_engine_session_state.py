@@ -162,6 +162,20 @@ class EngineWorkbenchStateTests(unittest.TestCase):
             self.assertTrue(switch.property("checked"))
             request.assert_called_once()
 
+    def test_window_gesture_defers_receipt_poll_until_release(self):
+        from PySide6.QtTest import QTest
+
+        window = self.open_workbench()
+        window.setProperty("windowResizing", True)
+        self.app.processEvents()
+        with patch.object(self.backend, "refreshEngineSessionDisplay",
+                          wraps=self.backend.refreshEngineSessionDisplay) as refresh:
+            QTest.qWait(1250)
+            refresh.assert_not_called()
+            window.setProperty("windowResizing", False)
+            refresh.assert_called_once_with()
+            self.assertFalse(self.backend._windowResizing)
+
     def test_visible_workbench_updates_for_a_late_receipt_with_no_channel_request(self):
         from PySide6.QtCore import QTimer
         from PySide6.QtQuick import QQuickItem
