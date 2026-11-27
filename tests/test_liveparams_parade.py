@@ -210,7 +210,7 @@ class ParadeDiscoveryTests(unittest.TestCase):
 
         注册表那一段就是 AE 顶部「效果」菜单和「效果」面板的名字来源
         （IG5: FLT_FCSpec::GetEffectName_MB @0x180066b90 = return this+0x10），
-        写它 = 菜单也变中文 = 用户明确拒绝的行为。
+        改写注册表会同时翻译菜单，因此这里仅修改实例的面板名称。
         """
         # 给第一个效果根流摆一个可换的英文名
         root0 = ROOT_BASE

@@ -64,18 +64,15 @@ class WallpaperUiMixin:
         self._weError = ""
         self._bgVideo = ""          # 视频背景的本地绝对路径；空 = 无
         self._bgWeId = ""           # 当前背景来自哪张壁纸（空 = 自定义/无）
-        # 画面调节（2026-11-16 用户要求可调磨砂/透明度/清晰度）。
-        # ★ 默认就是「磨砂玻璃」档：加了壁纸之后第一次看到的就是最终形态，
-        #   不用再去摸一遍滑块。这些值只在有壁纸时才有视觉意义。
+        # 有壁纸时应用磨砂、透明度和清晰度调节，默认使用磨砂玻璃样式。
         self._bgBlur = 24            # 0..60 磨砂档位
         self._bgBrightness = 94      # 50..160 %（100 = 不改）
         self._bgSaturation = 92      # 0..200 %
         self._bgContrast = 100       # 50..160 %
         self._bgFit = "cover"        # cover | contain
         self._glassBlur = 0          # 0..60 面板自己的磨砂档位（0 = 关）
-        #: 每张壁纸自己的一套画面参数 {壁纸id: {blur,brightness,saturation,contrast,fit}}
-        #: ★ 用户要的「壁纸也能调参数」在提取式背景里的正确形态：同一张壁纸换回来
-        #:   还是他上次调的那套；WE 自己的场景参数不在我们能改的范围内（见 docs/decisions.md）。
+        #: 按壁纸 ID 保存画面参数。再次选中同一壁纸时恢复其调节值。
+        #: 这些值用于显示背景，场景文件的参数由 Wallpaper Engine 管理。
         self._weTune = {}
         #: 待写入壁纸引擎的属性改动 {壁纸id: {属性名: 值}}。
         #: ★ 壁纸引擎几乎总在运行，而它退出时会把 config.json 整份覆盖回去。
@@ -148,8 +145,8 @@ class WallpaperUiMixin:
     def sceneRenderFailed(self, reason: str):
         """实时渲染确认画不出画面（QML 侧健康检查报的）→ 自动退回提取画面。
 
-        ★ 2026-11-17：实测有场景包 WebWallGL 画布恒为纯黑（例如 3470764447），
-          表现就是用户看到的「设置页黑屏」。宁可放弃热更新，也不能给黑屏。
+        有些场景包的 WebWallGL 画布恒为纯黑，例如 3470764447。
+        这时回退到提取画面，避免设置页显示黑底。
         """
         wid = self._bgSceneWeId
         if not wid:
@@ -237,7 +234,7 @@ class WallpaperUiMixin:
 
     @Slot(result="QVariantList")
     def refreshWallpapers(self):
-        """强制重扫（用户在设置页点了「刷新」）。"""
+        """重新扫描壁纸库，供设置页刷新使用。"""
         self._we_scan_sync()
         self._weScanned = True
         self.weChanged.emit()
@@ -371,10 +368,8 @@ class WallpaperUiMixin:
         else:
             val = str(value)[:200]
 
-        # ★★ 2026-11-17（用户实测反馈）：他关掉「随时间实时变化」却还在动 —— 因为当前
-        #   背景是这张场景壁纸**早先提取出来的视频**（动画已经烘进 MP4 里），改 WE 的
-        #   属性当然没用。所以：只要改的是"正在显示的那张场景壁纸"，就先强制切到实时
-        #   渲染再推属性 —— 用户改一下就该立刻看到效果，不该还要他懂"呈现方式"。
+        # 已提取的视频包含渲染过的动画，调整场景属性无法改变它。
+        # 修改当前场景壁纸的属性时先切到实时渲染，再应用属性。
         if (w.kind == "scene" and self.webEngineAvailable
                 and str(w.id) == str(self._bgWeId)
                 and str(w.id) != self._bgSceneWeId):
@@ -615,9 +610,8 @@ class WallpaperUiMixin:
         if target is None:
             return "找不到这张壁纸（可能已移除）"
 
-        # ★ 场景壁纸：**只有一种呈现方式** —— 实时渲染（WebWallGL + QtWebEngine）。
-        #   这样壁纸自带的参数才可能热更新；只有"装了 WebEngine 且起得来"时才成立，
-        #   否则自动退回提取画面（对用户来说不是选项，是降级）。
+        # 有可用的 WebEngine 时实时渲染，场景属性可热更新。
+        # 渲染不可用时回退到提取画面。
         if target.kind == "scene":
             live = self._applySceneLive(target)
             if live is not None:
@@ -876,7 +870,7 @@ class WallpaperUiMixin:
         self._saveUiSettings()
         self.videoBgChanged.emit()
 
-    # ---- 面板磨砂（2026-11-16 用户要求「方框的磨砂强度也要能调」）----
+    # ---- 面板磨砂 ----
 
     @Property(int, notify=videoBgChanged)
     def glassBlur(self):

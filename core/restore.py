@@ -194,12 +194,9 @@ def _name_is_english(path: str) -> bool:
 def _backup_roots_oldest_first() -> list:
     """所有备份根，从旧到新。
 
-    ★★ 2026-10-22 关键发现：
-      用户报「执行还原后 BCC 只有部分变回英文」。查下来 BCC 有 481 个 aex，
-      而 aex_name_backup 里【一个 BCC 都没有】—— 那个目录只存过别的位置。
-      但 backup/<时间戳>_apply/files/ 里存着每次应用前的原文件；
-      最早那次（20261020-165232_apply）有 474 个【纯英文】的 BCC 原件。
-      所以还原必须把所有历史备份都当成还原源，并且优先挑英文的那份。
+    实测安装的 481 个 BCC AEX 在 aex_name_backup 中没有副本，
+    而最早一轮应用备份含 474 个英文原件。扫描所有应用前的历史备份，
+    还原时优先使用英文原件。
     """
     roots = []
     p = os.path.join(DATA, "aex_name_backup")

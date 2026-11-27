@@ -1136,7 +1136,7 @@ def main(argv):
     os.makedirs(CTL, exist_ok=True)
     os.makedirs(TMP, exist_ok=True)
     # 上一个守护会话的采集文件必须清掉：补词页一旦读到旧快照，就会把已经
-    # 关掉的 AE 见过的词当成当前状态（2026-11-02 用户实测过这个坑）。
+    # 关掉的 AE 见过的词当成当前状态。
     for _stale in ("all_param_names.json", "renamed_names.json",
                    "rename_miss.json", "enum_missing.json"):
         try:

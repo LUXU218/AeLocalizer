@@ -78,9 +78,7 @@ class TestGrouping(unittest.TestCase):
 
 class TestChannels(unittest.TestCase):
     def test_default(self):
-        """★ 2026-11-02:新分组效果名通道默认关(参数+下拉开)。用户实测
-        「没开效果名也汉化了」—— 分组默认 ALL 让效果名跟着参数默认生效,
-        违背直觉;效果名是深度改写(.aex PiPL),应当显式开启。"""
+        """新分组默认开启参数和下拉，效果名写入需显式开启。"""
         g = PluginGroup(group_id="g", label="g")
         self.assertEqual(g.channels, (CH_PARAM, CH_ENUM))
         self.assertFalse(g.channel_effect)
